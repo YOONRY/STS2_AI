@@ -63,9 +63,10 @@ It scans visible scene-tree nodes and detects:
 
 1. Combat room card/end-turn controls.
 2. Card reward and generic card choice screens.
-3. Reward screen claim/proceed controls.
-4. Map screen map-point-like controls.
-5. Game-over continue controls.
+3. Deck card selection screens for remove, transform, enchant, and upgrade flows.
+4. Reward screen claim/proceed controls.
+5. Map screen map-point-like controls.
+6. Game-over continue controls.
 
 By default it only ranks choices and stores the latest decision context in
 `StsTdAi.last_context`. To let it click the best-ranked visible action:

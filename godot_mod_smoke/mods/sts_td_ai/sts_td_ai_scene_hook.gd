@@ -182,6 +182,11 @@ func _detect_context(root: Node) -> Dictionary:
 		"ChooseACardSelectionScreen",
 		"ChooseABundleSelectionScreen",
 		"ChooseARelicSelectionScreen",
+		"DeckCardSelectScreen",
+		"TransformSelectScreen",
+		"DeckUpgradeSelectScreen",
+		"DeckEnchantSelectScreen",
+		"SimpleCardSelectScreen",
 		"RewardsScreen",
 		"MapScreen",
 		"EventRoom",
@@ -232,6 +237,8 @@ func _collect_actions(root: Node, context: Dictionary) -> Array:
 			actions.append_array(_collect_combat_actions(root))
 		"CardRewardSelectionScreen", "ChooseACardSelectionScreen", "ChooseABundleSelectionScreen":
 			actions.append_array(_collect_card_choice_actions(root, screen))
+		"DeckCardSelectScreen", "TransformSelectScreen", "DeckUpgradeSelectScreen", "DeckEnchantSelectScreen", "SimpleCardSelectScreen":
+			actions.append_array(_collect_deck_card_selection_actions(root, screen))
 		"RewardsScreen":
 			actions.append_array(_collect_reward_actions(root))
 		"MapScreen":
@@ -257,6 +264,7 @@ func _collect_card_choice_actions(root: Node, screen: String) -> Array:
 	var actions := []
 	var card_row := _find_visible_node_by_name(root, "CardRow")
 	if card_row != null:
+		actions.append_array(_collect_card_holder_actions(card_row, "choose_card"))
 		for node in _collect_clickable_controls(card_row, false, true):
 			actions.append(_make_node_action("pick_card", node))
 	var alternatives := _find_visible_node_by_name(root, "RewardAlternatives")
@@ -265,7 +273,55 @@ func _collect_card_choice_actions(root: Node, screen: String) -> Array:
 			actions.append(_make_node_action("reward_alternative", node))
 	if actions.is_empty():
 		actions.append_array(_collect_generic_choice_actions(root, screen))
-	return actions
+	return _dedupe_actions(actions)
+
+
+func _collect_deck_card_selection_actions(root: Node, screen: String) -> Array:
+	var screen_node := _find_visible_node_by_name(root, screen)
+	if screen_node == null:
+		screen_node = root
+
+	var confirm_actions := _collect_visible_confirm_actions(screen_node)
+	if !confirm_actions.is_empty():
+		return confirm_actions
+
+	var actions := []
+	for grid in _collect_controls_by_name_fragment(screen_node, "CardGrid"):
+		actions.append_array(_collect_card_holder_actions(grid, "select_deck_card"))
+	if actions.is_empty():
+		actions.append_array(_collect_card_holder_actions(screen_node, "select_deck_card"))
+	if actions.is_empty():
+		for node in _collect_clickable_controls(screen_node, true, true):
+			if _has_ancestor_name_fragment(node, "cardgrid") or String(node.name).to_lower().contains("card"):
+				actions.append(_make_node_action("select_deck_card", node))
+	return _dedupe_actions(actions)
+
+
+func _collect_visible_confirm_actions(root: Node) -> Array:
+	var actions := []
+	for node in _collect_controls_by_name_fragment(root, "Confirm"):
+		if node is Control and node.is_visible_in_tree():
+			actions.append(_make_node_action("confirm_card_selection", node))
+	return _dedupe_actions(actions)
+
+
+func _collect_card_holder_actions(root: Node, action_type: String) -> Array:
+	var actions := []
+	_collect_card_holder_actions_recursive(root, action_type, actions)
+	return _dedupe_actions(actions)
+
+
+func _collect_card_holder_actions_recursive(node: Node, action_type: String, actions: Array) -> void:
+	if node is Control and node.is_visible_in_tree() and !_is_our_hud_node(node):
+		var lower := String(node.name).to_lower()
+		if lower == "hitbox" and _has_ancestor_name_fragment(node, "cardholder"):
+			actions.append(_make_node_action(action_type, node))
+		elif lower.contains("gridcardholder") or lower.contains("cardholder"):
+			var hitbox := _find_visible_node_by_name(node, "Hitbox")
+			if hitbox != null and hitbox is Control:
+				actions.append(_make_node_action(action_type, hitbox))
+	for child in node.get_children():
+		_collect_card_holder_actions_recursive(child, action_type, actions)
 
 
 func _collect_reward_actions(root: Node) -> Array:
@@ -365,7 +421,8 @@ func _invoke_sts_control(node: Control) -> bool:
 		node_name.contains("eventoptionbutton") or
 		node_name.contains("cardrewardalternativebutton") or
 		node_name.contains("proceedbutton") or
-		node_name.contains("skipbutton")
+		node_name.contains("skipbutton") or
+		node_name.contains("confirm")
 	)
 	if !should_try:
 		return false
@@ -412,6 +469,12 @@ func _apply_action_priors(ranked: Array, context: Dictionary) -> void:
 		match String(action.get("type", "")):
 			"pick_card":
 				score += 0.02
+			"choose_card":
+				score += 0.025
+			"select_deck_card":
+				score += 0.025
+			"confirm_card_selection":
+				score += 0.04
 			"claim_reward":
 				score += 0.03
 			"proceed":
@@ -484,6 +547,16 @@ func _collect_controls_by_name_fragment_recursive(node: Node, fragment: String, 
 			results.append(node)
 	for child in node.get_children():
 		_collect_controls_by_name_fragment_recursive(child, fragment, results)
+
+
+func _has_ancestor_name_fragment(node: Node, fragment: String) -> bool:
+	var current := node
+	var lower_fragment := fragment.to_lower()
+	while current != null:
+		if String(current.name).to_lower().contains(lower_fragment):
+			return true
+		current = current.get_parent()
+	return false
 
 
 func _dedupe_actions(actions: Array) -> Array:
@@ -579,6 +652,11 @@ func _best_label_for_node(node: Node) -> String:
 	var labels := _collect_visible_labels(node, 8)
 	if !labels.is_empty():
 		return String(labels[0])
+	var parent := node.get_parent()
+	if parent != null:
+		labels = _collect_visible_labels(parent, 8)
+		if !labels.is_empty():
+			return String(labels[0])
 	return String(node.name)
 
 
