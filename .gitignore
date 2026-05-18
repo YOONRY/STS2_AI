@@ -1,0 +1,36 @@
+/*
+
+!/.gitignore
+!/README.md
+
+!/sts_ai/
+!/sts_ai/**
+
+!/sts_td_ai_mod_dll/
+!/sts_td_ai_mod_dll/**
+
+!/tools/
+!/tools/**
+
+!/godot_mod_smoke/
+!/godot_mod_smoke/**
+
+!/build/
+!/build/sts_td_ai/
+!/build/sts_td_ai/**
+!/build/sts_td_ai.zip
+
+!/Slay the Spire 2/
+/Slay the Spire 2/*
+!/Slay the Spire 2/mods/
+/Slay the Spire 2/mods/*
+!/Slay the Spire 2/mods/sts_td_ai/
+!/Slay the Spire 2/mods/sts_td_ai/**
+
+**/bin/
+**/obj/
+**/.godot/
+**/.import/
+**/__pycache__/
+**/*.pyc
+**/*.tmp

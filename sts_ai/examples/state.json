@@ -1,0 +1,39 @@
+{
+  "state": {
+    "hp": 66,
+    "max_hp": 80,
+    "gold": 99,
+    "floor": 4,
+    "block": 0,
+    "energy": 3,
+    "deck": ["Strike", "Strike", "Defend", "Defend"],
+    "relics": [],
+    "potions": [],
+    "enemies": [],
+    "hand": []
+  },
+  "actions": [
+    {
+      "type": "pick_card",
+      "id": "POMMEL_STRIKE",
+      "predicted_state": {
+        "hp": 66,
+        "max_hp": 80,
+        "gold": 99,
+        "floor": 5,
+        "deck": ["Strike", "Strike", "Defend", "Defend", "Pommel Strike"]
+      }
+    },
+    {
+      "type": "skip_reward",
+      "id": "SKIP",
+      "predicted_state": {
+        "hp": 66,
+        "max_hp": 80,
+        "gold": 99,
+        "floor": 5,
+        "deck": ["Strike", "Strike", "Defend", "Defend"]
+      }
+    }
+  ]
+}

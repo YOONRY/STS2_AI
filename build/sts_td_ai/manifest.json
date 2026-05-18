@@ -1,0 +1,11 @@
+{
+  "id": "sts_td_ai",
+  "name": "STS TD AI",
+  "author": "ysg05",
+  "description": "Adds a Temporal Difference AI agent that ranks and can automate visible run decisions.",
+  "version": "0.1.0",
+  "has_pck": true,
+  "has_dll": true,
+  "dependencies": [],
+  "affects_gameplay": true
+}

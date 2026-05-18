@@ -1,0 +1,6 @@
+config_version=5
+
+[application]
+
+config/name="STS TD AI Mod Smoke"
+run/main_scene="res://smoke.tscn"

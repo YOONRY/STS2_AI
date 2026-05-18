@@ -1,0 +1,8 @@
+{
+  "id": "sts_td_ai",
+  "name": "STS TD AI",
+  "version": "0.1.0",
+  "entry": "res://mods/sts_td_ai/sts_td_ai.gd",
+  "autoload": "StsTdAi",
+  "description": "Temporal Difference learner for run-local Slay the Spire 2 decision making."
+}

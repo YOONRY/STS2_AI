@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "STS2 TD decision step",
+  "type": "object",
+  "required": ["state", "action", "reward", "next_state", "done"],
+  "properties": {
+    "state": {"type": "object"},
+    "action": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": {"type": "string"},
+        "id": {"type": "string"},
+        "target": {"type": "string"}
+      },
+      "additionalProperties": true
+    },
+    "reward": {"type": "number"},
+    "next_state": {"type": "object"},
+    "done": {"type": "boolean"}
+  },
+  "additionalProperties": true
+}
