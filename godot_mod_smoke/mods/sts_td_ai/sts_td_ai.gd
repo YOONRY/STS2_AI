@@ -422,7 +422,7 @@ func _refresh_hud() -> void:
 	]
 	_refresh_status_light(phase)
 	if _auto_play_button != null:
-		_auto_play_button.text = "AI ON" if auto_play_enabled else "AI OFF"
+		_auto_play_button.text = "Turn AI OFF" if auto_play_enabled else "Turn AI ON"
 
 
 func _status_spinner() -> String:

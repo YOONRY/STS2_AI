@@ -80,8 +80,8 @@ manual player chose the same action.
 
 ## In-Game Controls
 
-The small `STS TD AI` overlay includes one `AI OFF` / `AI ON` button. Press it
-to toggle auto-play.
+The small `STS TD AI` overlay includes one `Turn AI ON` / `Turn AI OFF` button.
+Press it to toggle auto-play.
 
 The overlay also shows the agent state:
 
