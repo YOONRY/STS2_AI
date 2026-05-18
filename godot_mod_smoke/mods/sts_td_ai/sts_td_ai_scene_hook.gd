@@ -43,15 +43,31 @@ func _scan_current_screen() -> void:
 	var root := get_tree().root
 	var context := _detect_context(root)
 	if context["screen"] == "":
+		ai.note_agent_status({
+			"phase": "scanning",
+			"detail": "no active run screen"
+		})
 		return
 
+	ai.note_agent_status({
+		"phase": "scanning",
+		"detail": String(context["screen"])
+	})
 	var state := _extract_state(root, context)
 	var actions := _collect_actions(root, context)
 	if actions.is_empty():
+		ai.note_agent_status({
+			"phase": "waiting",
+			"detail": "no actions on %s" % String(context["screen"])
+		})
 		return
 
 	var signature := _make_signature(context, actions)
 	if signature == last_signature and decision_cooldown > 0.0:
+		ai.note_agent_status({
+			"phase": "cooldown",
+			"detail": "%.1fs before retry" % decision_cooldown
+		})
 		return
 
 	if signature != last_signature and last_action_was_executed and !last_action.is_empty() and !last_state.is_empty():
@@ -64,6 +80,10 @@ func _scan_current_screen() -> void:
 	_apply_action_priors(ranked, context)
 	ranked.sort_custom(func(a, b): return float(a["value"]) > float(b["value"]))
 	ai.note_decision_context(context, state, ranked)
+	ai.note_agent_status({
+		"phase": "thinking",
+		"detail": "%d actions ranked" % ranked.size()
+	})
 
 	last_signature = signature
 	last_state = state
@@ -71,9 +91,28 @@ func _scan_current_screen() -> void:
 	last_action_was_executed = false
 
 	if bool(ai.auto_play_enabled) and decision_cooldown <= 0.0 and !ranked.is_empty():
-		if _execute_action(ranked[0]["action"]):
+		var auto_action: Dictionary = ranked[0]["action"]
+		ai.note_agent_status({
+			"phase": "acting",
+			"detail": _describe_action(auto_action)
+		})
+		if _execute_action(auto_action):
 			last_action_was_executed = true
 			decision_cooldown = DECISION_COOLDOWN
+			ai.note_agent_status({
+				"phase": "clicked",
+				"detail": _describe_action(auto_action)
+			})
+		else:
+			ai.note_agent_status({
+				"phase": "failed",
+				"detail": _describe_action(auto_action)
+			})
+	elif !bool(ai.auto_play_enabled):
+		ai.note_agent_status({
+			"phase": "watching",
+			"detail": "auto is off"
+		})
 
 
 func execute_best_ranked_action() -> Dictionary:
@@ -90,7 +129,15 @@ func execute_best_ranked_action() -> Dictionary:
 	var action = ranked_item.get("action", {})
 	if !(action is Dictionary):
 		return {}
+	ai.note_agent_status({
+		"phase": "acting",
+		"detail": _describe_action(action)
+	})
 	if !_execute_action(action):
+		ai.note_agent_status({
+			"phase": "failed",
+			"detail": _describe_action(action)
+		})
 		return {}
 
 	var state = ai.last_context.get("state", {}) if ai.last_context is Dictionary else {}
@@ -98,6 +145,10 @@ func execute_best_ranked_action() -> Dictionary:
 	last_action = action
 	last_action_was_executed = true
 	decision_cooldown = DECISION_COOLDOWN
+	ai.note_agent_status({
+		"phase": "clicked",
+		"detail": _describe_action(action)
+	})
 	return action
 
 
@@ -270,6 +321,17 @@ func _make_node_action(action_type: String, node: Control) -> Dictionary:
 		"node_name": String(node.name),
 		"label": label
 	}
+
+
+func _describe_action(action: Dictionary) -> String:
+	var label := String(action.get("label", action.get("id", ""))).strip_edges()
+	var action_type := String(action.get("type", "action"))
+	var node_name := String(action.get("node_name", ""))
+	if label != "":
+		return "%s %s" % [action_type, label.left(32)]
+	if node_name != "":
+		return "%s %s" % [action_type, node_name]
+	return action_type
 
 
 func _execute_action(action: Dictionary) -> bool:

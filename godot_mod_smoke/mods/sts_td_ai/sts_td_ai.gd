@@ -24,9 +24,15 @@ var weights := {}
 var total_observed_steps := 0
 var last_context := {}
 var last_ranked_actions := []
+var agent_status := {
+	"phase": "starting",
+	"detail": "loading",
+	"updated_at": ""
+}
 var _scene_hook: Node
 var _hud_layer: CanvasLayer
 var _hud_label: Label
+var _hud_status_light: ColorRect
 var _auto_play_button: Button
 var _hud_enabled := true
 var _hud_update_accumulator := 0.0
@@ -138,8 +144,19 @@ func note_decision_context(context: Dictionary, state: Dictionary, ranked_action
 	last_ranked_actions = ranked_actions
 
 
+func note_agent_status(status: Dictionary) -> void:
+	for key in status.keys():
+		agent_status[key] = status[key]
+	agent_status["updated_at"] = Time.get_datetime_string_from_system()
+	_refresh_hud()
+
+
 func set_auto_play_enabled(enabled: bool) -> void:
 	auto_play_enabled = enabled
+	note_agent_status({
+		"phase": "watching" if enabled else "off",
+		"detail": "auto enabled" if enabled else "auto disabled"
+	})
 	save_settings()
 	_refresh_hud()
 
@@ -349,6 +366,12 @@ func _create_hud() -> void:
 	contents.mouse_filter = Control.MOUSE_FILTER_PASS
 	panel.add_child(contents)
 
+	_hud_status_light = ColorRect.new()
+	_hud_status_light.name = "StatusLight"
+	_hud_status_light.custom_minimum_size = Vector2(260.0, 8.0)
+	_hud_status_light.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	contents.add_child(_hud_status_light)
+
 	_hud_label = Label.new()
 	_hud_label.name = "Status"
 	_hud_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -382,8 +405,14 @@ func _refresh_hud() -> void:
 		var action: Dictionary = top.get("action", {}) if top.get("action", {}) is Dictionary else {}
 		best_label = String(action.get("label", action.get("id", "")))
 		best_type = String(action.get("type", ""))
-	_hud_label.text = "STS TD AI %s\nscreen=%s actions=%d steps=%d\nbest=%s %s %.3f" % [
+	var phase := String(agent_status.get("phase", "idle"))
+	var detail := String(agent_status.get("detail", ""))
+	var spinner := _status_spinner()
+	_hud_label.text = "STS TD AI %s %s\nstate=%s %s\nscreen=%s actions=%d steps=%d\nbest=%s %s %.3f" % [
 		"ON" if auto_play_enabled else "OFF",
+		spinner if auto_play_enabled else "",
+		phase,
+		detail,
 		screen if screen != "" else "unknown",
 		last_ranked_actions.size(),
 		total_observed_steps,
@@ -391,5 +420,33 @@ func _refresh_hud() -> void:
 		best_label,
 		best_value
 	]
+	_refresh_status_light(phase)
 	if _auto_play_button != null:
 		_auto_play_button.text = "AI ON" if auto_play_enabled else "AI OFF"
+
+
+func _status_spinner() -> String:
+	var frames := ["|", "/", "-", "\\"]
+	var index := int(Time.get_ticks_msec() / 250) % frames.size()
+	return frames[index]
+
+
+func _refresh_status_light(phase: String) -> void:
+	if _hud_status_light == null:
+		return
+	var pulse := 0.55 + 0.35 * absf(sin(float(Time.get_ticks_msec()) / 220.0))
+	match phase:
+		"thinking":
+			_hud_status_light.color = Color(1.0, 0.86, 0.20, pulse)
+		"acting":
+			_hud_status_light.color = Color(1.0, 0.48, 0.12, pulse)
+		"clicked":
+			_hud_status_light.color = Color(0.35, 1.0, 0.45, 0.85)
+		"failed":
+			_hud_status_light.color = Color(1.0, 0.2, 0.2, 0.85)
+		"cooldown":
+			_hud_status_light.color = Color(0.25, 0.65, 1.0, pulse)
+		"waiting", "scanning", "watching":
+			_hud_status_light.color = Color(0.50, 0.78, 1.0, 0.75)
+		_:
+			_hud_status_light.color = Color(0.45, 0.45, 0.45, 0.65)

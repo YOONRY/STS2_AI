@@ -83,6 +83,15 @@ manual player chose the same action.
 The small `STS TD AI` overlay includes one `AI OFF` / `AI ON` button. Press it
 to toggle auto-play.
 
+The overlay also shows the agent state:
+
+- `scanning`: Looking for a supported screen.
+- `thinking`: Ranking visible actions.
+- `acting`: Attempting to execute the best action.
+- `clicked`: An action was sent.
+- `cooldown`: Waiting briefly before retrying.
+- `waiting`: A screen was found, but no clickable action was found.
+
 This is intentionally conservative because the current extraction does not
 include usable C# gameplay bodies. Once those are available, replace the
 scene-tree scanner with direct game-state adapters and keep the same TD API.
