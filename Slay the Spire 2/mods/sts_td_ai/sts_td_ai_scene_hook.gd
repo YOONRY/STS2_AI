@@ -3,6 +3,7 @@ extends Node
 const SCAN_INTERVAL := 0.35
 const DECISION_COOLDOWN := 0.9
 const MAX_LABEL_TEXT := 80
+const MAX_ACTIONS_PER_SCAN := 24
 
 var ai: Node
 var scan_accumulator := 0.0
@@ -205,11 +206,11 @@ func _collect_card_choice_actions(root: Node, screen: String) -> Array:
 	var actions := []
 	var card_row := _find_visible_node_by_name(root, "CardRow")
 	if card_row != null:
-		for node in _collect_clickable_controls(card_row):
+		for node in _collect_clickable_controls(card_row, false, true):
 			actions.append(_make_node_action("pick_card", node))
 	var alternatives := _find_visible_node_by_name(root, "RewardAlternatives")
 	if alternatives != null:
-		for node in _collect_clickable_controls(alternatives):
+		for node in _collect_clickable_controls(alternatives, true, true):
 			actions.append(_make_node_action("reward_alternative", node))
 	if actions.is_empty():
 		actions.append_array(_collect_generic_choice_actions(root, screen))
@@ -220,10 +221,13 @@ func _collect_reward_actions(root: Node) -> Array:
 	var container := _find_visible_node_by_name(root, "RewardsContainer")
 	var actions := []
 	if container != null:
-		for node in _collect_clickable_controls(container):
+		for node in _collect_clickable_controls(container, true, true):
+			actions.append(_make_node_action("claim_reward", node))
+	if actions.is_empty():
+		for node in _collect_controls_by_name_fragment(root, "RewardButton"):
 			actions.append(_make_node_action("claim_reward", node))
 	actions.append_array(_collect_named_control_actions(root, ["ProceedButton"], "proceed"))
-	return actions
+	return _dedupe_actions(actions)
 
 
 func _collect_map_actions(root: Node) -> Array:
@@ -237,12 +241,15 @@ func _collect_map_actions(root: Node) -> Array:
 
 func _collect_generic_choice_actions(root: Node, screen: String) -> Array:
 	var actions := []
-	for node in _collect_clickable_controls(root):
+	var context_root := _find_visible_node_by_name(root, screen)
+	if context_root == null:
+		context_root = root
+	for node in _collect_clickable_controls(context_root, true, true):
 		var node_name := String(node.name)
 		var lower := node_name.to_lower()
-		if lower.contains("button") or lower.contains("choice") or lower.contains("option"):
+		if _looks_like_action_control(node):
 			actions.append(_make_node_action(_screen_to_action_type(screen), node))
-	return actions
+	return _dedupe_actions(actions)
 
 
 func _collect_named_control_actions(root: Node, names: Array, action_type: String) -> Array:
@@ -273,6 +280,13 @@ func _execute_action(action: Dictionary) -> bool:
 	var node := get_node_or_null(path)
 	if node == null or !(node is Control) or !node.is_visible_in_tree():
 		return false
+	print("[StsTdAi] execute type=%s label=%s node=%s" % [
+		String(action.get("type", "")),
+		String(action.get("label", "")),
+		path_text
+	])
+	if _invoke_sts_control(node):
+		return true
 	if node is BaseButton:
 		node.pressed.emit()
 		return true
@@ -282,11 +296,36 @@ func _execute_action(action: Dictionary) -> bool:
 	return _click_control(node)
 
 
+func _invoke_sts_control(node: Control) -> bool:
+	var node_name := String(node.name).to_lower()
+	var should_try := (
+		node_name.contains("rewardbutton") or
+		node_name.contains("eventoptionbutton") or
+		node_name.contains("cardrewardalternativebutton") or
+		node_name.contains("proceedbutton") or
+		node_name.contains("skipbutton")
+	)
+	if !should_try:
+		return false
+
+	var called := false
+	if node.has_method("OnPress"):
+		node.call("OnPress")
+		called = true
+	if node.has_method("OnRelease"):
+		node.call("OnRelease")
+		called = true
+	return called
+
+
 func _click_control(node: Control) -> bool:
 	var rect := node.get_global_rect()
 	if rect.size.x <= 0.0 or rect.size.y <= 0.0:
 		return false
 	var position := rect.position + rect.size * 0.5
+	var motion := InputEventMouseMotion.new()
+	motion.position = position
+	motion.global_position = position
 	var press := InputEventMouseButton.new()
 	press.button_index = MOUSE_BUTTON_LEFT
 	press.pressed = true
@@ -297,9 +336,8 @@ func _click_control(node: Control) -> bool:
 	release.pressed = false
 	release.position = position
 	release.global_position = position
-	if node.has_signal("gui_input"):
-		node.emit_signal("gui_input", press)
-		node.emit_signal("gui_input", release)
+	get_viewport().warp_mouse(position)
+	get_viewport().push_input(motion, true)
 	get_viewport().push_input(press, true)
 	get_viewport().push_input(release, true)
 	return true
@@ -325,21 +363,90 @@ func _apply_action_priors(ranked: Array, context: Dictionary) -> void:
 		item["value"] = score
 
 
-func _collect_clickable_controls(root: Node) -> Array:
+func _collect_clickable_controls(root: Node, include_mouse_ignore := false, permissive := false) -> Array:
 	var results := []
-	_collect_clickable_controls_recursive(root, results)
+	_collect_clickable_controls_recursive(root, results, include_mouse_ignore, permissive)
 	return results
 
 
-func _collect_clickable_controls_recursive(node: Node, results: Array) -> void:
+func _collect_clickable_controls_recursive(node: Node, results: Array, include_mouse_ignore: bool, permissive: bool) -> void:
 	if node is Control and node.is_visible_in_tree():
 		var control := node as Control
-		var node_name := String(node.name).to_lower()
-		if control.mouse_filter != Control.MOUSE_FILTER_IGNORE:
-			if node is BaseButton or node.has_signal("pressed") or node_name.contains("button") or node_name.contains("card") or node_name.contains("choice") or node_name.contains("option"):
-				results.append(control)
+		if !_is_our_hud_node(control):
+			var accepts_mouse := control.mouse_filter != Control.MOUSE_FILTER_IGNORE
+			if accepts_mouse or include_mouse_ignore:
+				if _is_clickable_control(control, permissive):
+					results.append(control)
 	for child in node.get_children():
-		_collect_clickable_controls_recursive(child, results)
+		_collect_clickable_controls_recursive(child, results, include_mouse_ignore, permissive)
+
+
+func _is_clickable_control(control: Control, permissive: bool) -> bool:
+	var rect := control.get_global_rect()
+	if rect.size.x < 24.0 or rect.size.y < 24.0:
+		return false
+	if rect.size.x > 1600.0 or rect.size.y > 950.0:
+		return false
+	if control is Label or control is RichTextLabel:
+		return false
+	if control is BaseButton or control.has_signal("pressed"):
+		return true
+	if _looks_like_action_control(control):
+		return true
+	if permissive and _best_label_for_node(control) != "":
+		return true
+	return false
+
+
+func _looks_like_action_control(node: Node) -> bool:
+	var lower := String(node.name).to_lower()
+	return (
+		lower.contains("button") or
+		lower.contains("choice") or
+		lower.contains("option") or
+		lower.contains("reward") or
+		lower.contains("proceed") or
+		lower.contains("skip")
+	)
+
+
+func _collect_controls_by_name_fragment(root: Node, fragment: String) -> Array:
+	var results := []
+	_collect_controls_by_name_fragment_recursive(root, fragment.to_lower(), results)
+	return results
+
+
+func _collect_controls_by_name_fragment_recursive(node: Node, fragment: String, results: Array) -> void:
+	if node is Control and node.is_visible_in_tree():
+		if String(node.name).to_lower().contains(fragment) and !_is_our_hud_node(node):
+			results.append(node)
+	for child in node.get_children():
+		_collect_controls_by_name_fragment_recursive(child, fragment, results)
+
+
+func _dedupe_actions(actions: Array) -> Array:
+	var seen := {}
+	var deduped := []
+	for action in actions:
+		if !(action is Dictionary):
+			continue
+		var path := String(action.get("node_path", ""))
+		if path == "" or seen.has(path):
+			continue
+		seen[path] = true
+		deduped.append(action)
+		if deduped.size() >= MAX_ACTIONS_PER_SCAN:
+			break
+	return deduped
+
+
+func _is_our_hud_node(node: Node) -> bool:
+	var current := node
+	while current != null:
+		if String(current.name) == "StsTdAiHud":
+			return true
+		current = current.get_parent()
+	return false
 
 
 func _collect_visible_labels(root: Node, limit: int) -> Array:
