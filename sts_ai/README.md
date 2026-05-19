@@ -14,6 +14,8 @@ each choice as `V(predicted_state) + A(state, action)`. Card actions get a
 small heuristic seed and learned action weights, so remove, transform, upgrade,
 and pick decisions can treat weak basics, curses, duplicates, and upgraded cards
 differently before enough run data has accumulated.
+Deck-size interaction features use `thin <= 20`, `medium 20..30`, and
+`thick >= 30`, with boundary values allowed to activate both adjacent signals.
 
 ## Files
 

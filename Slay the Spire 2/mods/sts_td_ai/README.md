@@ -42,6 +42,9 @@ value of that predicted state plus the action value for the current choice.
 Card actions also include a small card heuristic and learned action weights, so
 remove/transform/upgrade/pick decisions can prefer removing weak basics or
 curses while preserving higher-value cards for upgrades.
+Deck-size interaction features use the thresholds `thin <= 20`, `medium 20..30`,
+and `thick >= 30`; boundary decks can intentionally activate both adjacent
+signals.
 
 Example action:
 

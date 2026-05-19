@@ -327,20 +327,33 @@ func extract_action_features(state: Dictionary, action: Dictionary) -> Dictionar
 		var deck_size := float(deck.size()) if deck is Array else 0.0
 		var deck_count := _deck_count_for_card(state, card_name)
 		var base_score := _card_base_score(card_name, card_type, card_cost)
+		var deck_flags := _deck_size_flags(deck_size)
 		features["card_action_bias"] = 1.0
 		features["deck_size_norm"] = minf(deck_size / 40.0, 1.0)
 		features["deck_copies_norm"] = minf(float(deck_count) / 5.0, 1.0)
 		features["card_base_score"] = base_score
 		features["card_is_basic"] = 1.0 if _is_basic_card(card_name) else 0.0
 		features["card_is_curse_or_status"] = 1.0 if _is_curse_or_status(card_name, card_type) else 0.0
+		for band in deck_flags.keys():
+			var active := float(deck_flags[band])
+			features["deck_%s" % band] = active
+			features["action_type_deck:%s:%s" % [action_type, band]] = active
+			features["card_base_score_deck_%s" % band] = base_score * active
 		if card_cost >= 0.0:
 			features["card_cost_norm"] = minf(card_cost / 4.0, 1.0)
 		if card_type != "":
 			features["card_type:%s" % card_type] = 1.0
+			for band in deck_flags.keys():
+				if float(deck_flags[band]) > 0.0:
+					features["card_type_deck:%s:%s" % [card_type, band]] = 1.0
 		if card_name != "":
 			var bucket := _stable_bucket("card:%s" % card_name)
 			features["card_bucket_%d" % bucket] = 1.0
 			features["action_card_bucket:%s:%d" % [action_type, bucket]] = 1.0
+			for band in deck_flags.keys():
+				if float(deck_flags[band]) > 0.0:
+					features["card_deck:%d:%s" % [bucket, band]] = 1.0
+					features["action_card_deck:%s:%d:%s" % [action_type, bucket, band]] = 1.0
 	return features
 
 
@@ -354,7 +367,7 @@ func card_action_heuristic(state: Dictionary, action: Dictionary) -> float:
 	var base_score := _card_base_score(card_name, card_type, card_cost)
 	var deck = state.get("deck", [])
 	var deck_size := float(deck.size()) if deck is Array else 0.0
-	var deck_bloat_penalty := maxf(deck_size - 12.0, 0.0) * 0.01
+	var deck_bloat_penalty := maxf(deck_size - 20.0, 0.0) * 0.006
 	var duplicate_penalty := maxf(float(_deck_count_for_card(state, card_name)) - 1.0, 0.0) * 0.025
 
 	match action_type:
@@ -377,6 +390,14 @@ func card_action_heuristic(state: Dictionary, action: Dictionary) -> float:
 		"pick_card", "choose_card", "select_deck_card":
 			return clampf(base_score - deck_bloat_penalty - duplicate_penalty, -1.0, 1.0)
 	return 0.0
+
+
+func _deck_size_flags(deck_size: float) -> Dictionary:
+	return {
+		"thin": 1.0 if deck_size <= 20.0 else 0.0,
+		"medium": 1.0 if deck_size >= 20.0 and deck_size <= 30.0 else 0.0,
+		"thick": 1.0 if deck_size >= 30.0 else 0.0
+	}
 
 
 func _learned_action_value(state: Dictionary, action: Dictionary) -> float:

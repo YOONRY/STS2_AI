@@ -54,6 +54,14 @@ def deck_count_for_card(state: JsonObject, card_name: str) -> int:
     return sum(1 for card in deck if normalize_card_text(str(card)).lower() == normalized)
 
 
+def deck_size_flags(deck_size: int | float) -> dict[str, float]:
+    return {
+        "thin": float(deck_size <= 20),
+        "medium": float(20 <= deck_size <= 30),
+        "thick": float(deck_size >= 30),
+    }
+
+
 def is_basic_strike(card_name: str) -> bool:
     lower = card_name.lower()
     return lower == "strike" or "strike" in lower or "타격" in lower
@@ -132,7 +140,7 @@ def card_action_heuristic(state: JsonObject, action: JsonObject) -> float:
     base_score = card_base_score(card_name, card_type, card_cost)
     deck = state.get("deck", [])
     deck_size = len(deck) if isinstance(deck, list) else 0
-    deck_bloat_penalty = max(deck_size - 12, 0) * 0.01
+    deck_bloat_penalty = max(deck_size - 20, 0) * 0.006
     duplicate_penalty = max(deck_count_for_card(state, card_name) - 1, 0) * 0.025
 
     if action_type == "remove_card":
@@ -207,6 +215,7 @@ class FeatureExtractor:
             deck_size = len(deck) if isinstance(deck, list) else 0
             deck_count = deck_count_for_card(state, card_name)
             base_score = card_base_score(card_name, card_type, card_cost)
+            deck_flags = deck_size_flags(deck_size)
             features.update(
                 {
                     "card_action_bias": 1.0,
@@ -217,14 +226,25 @@ class FeatureExtractor:
                     "card_is_curse_or_status": float(is_curse_or_status(card_name, card_type)),
                 }
             )
+            for band, active in deck_flags.items():
+                features[f"deck_{band}"] = active
+                features[f"action_type_deck:{action_type}:{band}"] = active
+                features[f"card_base_score_deck_{band}"] = base_score * active
             if card_cost >= 0:
                 features["card_cost_norm"] = min(card_cost / 4.0, 1.0)
             if card_type:
                 features[f"card_type:{card_type}"] = 1.0
+                for band, active in deck_flags.items():
+                    if active:
+                        features[f"card_type_deck:{card_type}:{band}"] = 1.0
             if card_name:
                 bucket = stable_bucket(f"card:{card_name}", self.hash_buckets)
                 features[f"card_bucket_{bucket}"] = 1.0
                 features[f"action_card_bucket:{action_type}:{bucket}"] = 1.0
+                for band, active in deck_flags.items():
+                    if active:
+                        features[f"card_deck:{bucket}:{band}"] = 1.0
+                        features[f"action_card_deck:{action_type}:{bucket}:{band}"] = 1.0
         return features
 
     def _add_collection(
