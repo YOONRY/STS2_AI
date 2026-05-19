@@ -13,6 +13,15 @@ const DEFAULT_GAMMA := 0.98
 const DEFAULT_EPSILON := 0.05
 const DEFAULT_HASH_BUCKETS := 256
 const HUD_UPDATE_INTERVAL := 0.4
+const CARD_ACTION_TYPES := [
+	"pick_card",
+	"choose_card",
+	"select_deck_card",
+	"remove_card",
+	"upgrade_card",
+	"transform_card",
+	"enchant_card"
+]
 const SceneHook := preload("res://mods/sts_td_ai/sts_td_ai_scene_hook.gd")
 
 var alpha := DEFAULT_ALPHA
@@ -21,6 +30,7 @@ var epsilon := DEFAULT_EPSILON
 var hash_buckets := DEFAULT_HASH_BUCKETS
 var auto_play_enabled := false
 var weights := {}
+var action_weights := {}
 var total_observed_steps := 0
 var last_context := {}
 var last_ranked_actions := []
@@ -73,13 +83,19 @@ func observe_step(state: Dictionary, action: Dictionary, reward: float, next_sta
 		"observed_at": Time.get_datetime_string_from_system()
 	}
 	_append_jsonl(RUN_LOG_PATH, step)
-	var error: float = update_value(state, reward, next_state, done)
+	var state_error: float = update_value(state, reward, next_state, done)
+	var action_error: float = update_action_value(state, action, reward, next_state, done)
+	var error: float = (state_error + action_error) * 0.5
 	total_observed_steps += 1
 	step_observed.emit(step)
 	model_updated.emit(1, absf(error))
 	if done:
 		save_model()
 	return error
+
+
+func action_value(state: Dictionary, action: Dictionary) -> float:
+	return _learned_action_value(state, action) + card_action_heuristic(state, action)
 
 
 func value(state: Dictionary) -> float:
@@ -106,6 +122,24 @@ func update_value(state: Dictionary, reward: float, next_state: Dictionary, done
 	return error
 
 
+func update_action_value(state: Dictionary, action: Dictionary, reward: float, next_state: Dictionary, done: bool) -> float:
+	if action.is_empty():
+		return 0.0
+	var features := extract_action_features(state, action)
+	if features.is_empty():
+		return 0.0
+
+	var current: float = value(state) + _learned_action_value(state, action)
+	var bootstrap: float = 0.0 if done else value(next_state)
+	var target: float = reward + gamma * bootstrap
+	var error: float = target - current
+
+	for feature_name in features.keys():
+		action_weights[feature_name] = float(action_weights.get(feature_name, 0.0)) + alpha * error * float(features[feature_name])
+
+	return error
+
+
 func rank_actions(state: Dictionary, actions: Array) -> Array:
 	var ranked := []
 	for action in actions:
@@ -113,6 +147,7 @@ func rank_actions(state: Dictionary, actions: Array) -> Array:
 			continue
 		var predicted_state = action.get("predicted_state", state)
 		var score: float = value(predicted_state) if predicted_state is Dictionary else value(state)
+		score += action_value(state, action)
 		ranked.append({
 			"action": action,
 			"value": score
@@ -188,14 +223,24 @@ func train_from_log(path := RUN_LOG_PATH) -> Dictionary:
 			continue
 		if !parsed.has("state") or !parsed.has("next_state"):
 			continue
-		var error: float = update_value(
+		var state_error: float = update_value(
 			parsed["state"],
 			float(parsed.get("reward", 0.0)),
 			parsed["next_state"],
 			bool(parsed.get("done", false))
 		)
+		var action_error := 0.0
+		var action = parsed.get("action", {})
+		if action is Dictionary:
+			action_error = update_action_value(
+				parsed["state"],
+				action,
+				float(parsed.get("reward", 0.0)),
+				parsed["next_state"],
+				bool(parsed.get("done", false))
+			)
 		steps += 1
-		abs_error += absf(error)
+		abs_error += absf((state_error + action_error) * 0.5)
 
 	save_model()
 	var mean_error: float = abs_error / float(max(steps, 1))
@@ -214,6 +259,7 @@ func save_model() -> void:
 		"epsilon": epsilon,
 		"hash_buckets": hash_buckets,
 		"weights": weights,
+		"action_weights": action_weights,
 		"total_observed_steps": total_observed_steps,
 		"saved_at": Time.get_datetime_string_from_system()
 	})
@@ -268,8 +314,199 @@ func extract_features(state: Dictionary) -> Dictionary:
 	return features
 
 
+func extract_action_features(state: Dictionary, action: Dictionary) -> Dictionary:
+	var action_type := String(action.get("type", "unknown")).to_lower()
+	var card_name := _card_name_from_action(action)
+	var card_type := String(action.get("card_type", "")).to_lower()
+	var card_cost := float(action.get("card_cost", -1.0))
+
+	var features := {"action_bias": 1.0}
+	features["action_type:%s" % action_type] = 1.0
+	if _is_card_action_type(action_type):
+		var deck = state.get("deck", [])
+		var deck_size := float(deck.size()) if deck is Array else 0.0
+		var deck_count := _deck_count_for_card(state, card_name)
+		var base_score := _card_base_score(card_name, card_type, card_cost)
+		features["card_action_bias"] = 1.0
+		features["deck_size_norm"] = minf(deck_size / 40.0, 1.0)
+		features["deck_copies_norm"] = minf(float(deck_count) / 5.0, 1.0)
+		features["card_base_score"] = base_score
+		features["card_is_basic"] = 1.0 if _is_basic_card(card_name) else 0.0
+		features["card_is_curse_or_status"] = 1.0 if _is_curse_or_status(card_name, card_type) else 0.0
+		if card_cost >= 0.0:
+			features["card_cost_norm"] = minf(card_cost / 4.0, 1.0)
+		if card_type != "":
+			features["card_type:%s" % card_type] = 1.0
+		if card_name != "":
+			var bucket := _stable_bucket("card:%s" % card_name)
+			features["card_bucket_%d" % bucket] = 1.0
+			features["action_card_bucket:%s:%d" % [action_type, bucket]] = 1.0
+	return features
+
+
+func card_action_heuristic(state: Dictionary, action: Dictionary) -> float:
+	var action_type := String(action.get("type", "unknown")).to_lower()
+	if !_is_card_action_type(action_type):
+		return 0.0
+	var card_name := _card_name_from_action(action)
+	var card_type := String(action.get("card_type", "")).to_lower()
+	var card_cost := float(action.get("card_cost", -1.0))
+	var base_score := _card_base_score(card_name, card_type, card_cost)
+	var deck = state.get("deck", [])
+	var deck_size := float(deck.size()) if deck is Array else 0.0
+	var deck_bloat_penalty := maxf(deck_size - 12.0, 0.0) * 0.01
+	var duplicate_penalty := maxf(float(_deck_count_for_card(state, card_name)) - 1.0, 0.0) * 0.025
+
+	match action_type:
+		"remove_card":
+			var cleanup_bonus := 0.0
+			if _is_basic_card(card_name):
+				cleanup_bonus += 0.35
+			if _is_curse_or_status(card_name, card_type):
+				cleanup_bonus += 1.0
+			return clampf((-base_score * 0.55) + cleanup_bonus + deck_bloat_penalty, -0.4, 1.4)
+		"transform_card":
+			return clampf((0.35 - base_score * 0.45) + (0.25 if _is_basic_card(card_name) else 0.0), -0.35, 0.9)
+		"upgrade_card", "enchant_card":
+			if _is_curse_or_status(card_name, card_type):
+				return -0.6
+			var upgrade_bonus := maxf(base_score, 0.0) * 0.35
+			if _is_basic_strike(card_name):
+				upgrade_bonus -= 0.18
+			return clampf(upgrade_bonus, -0.25, 0.75)
+		"pick_card", "choose_card", "select_deck_card":
+			return clampf(base_score - deck_bloat_penalty - duplicate_penalty, -1.0, 1.0)
+	return 0.0
+
+
+func _learned_action_value(state: Dictionary, action: Dictionary) -> float:
+	var features := extract_action_features(state, action)
+	var result := 0.0
+	for feature_name in features.keys():
+		result += float(action_weights.get(feature_name, 0.0)) * float(features[feature_name])
+	return result
+
+
+func _is_card_action_type(action_type: String) -> bool:
+	return CARD_ACTION_TYPES.has(action_type)
+
+
+func _card_name_from_action(action: Dictionary) -> String:
+	for key in ["card_name", "label", "id", "node_name"]:
+		var text := _normalize_card_text(String(action.get(key, "")))
+		if text != "":
+			return text
+	return ""
+
+
+func _normalize_card_text(text: String) -> String:
+	var normalized := text.strip_edges()
+	if normalized == "":
+		return ""
+	normalized = normalized.replace("[center]", "")
+	normalized = normalized.replace("[/center]", "")
+	normalized = normalized.replace("[b]", "")
+	normalized = normalized.replace("[/b]", "")
+	normalized = normalized.replace("[i]", "")
+	normalized = normalized.replace("[/i]", "")
+	normalized = normalized.replace("\n", " ")
+	normalized = normalized.replace("\t", " ")
+	while normalized.contains("  "):
+		normalized = normalized.replace("  ", " ")
+	if normalized.length() > 64:
+		normalized = normalized.left(64)
+	return normalized.strip_edges()
+
+
+func _deck_count_for_card(state: Dictionary, card_name: String) -> int:
+	if card_name == "":
+		return 0
+	var deck = state.get("deck", [])
+	if !(deck is Array):
+		return 0
+	var normalized := card_name.to_lower()
+	var count := 0
+	for card in deck:
+		if _normalize_card_text(str(card)).to_lower() == normalized:
+			count += 1
+	return count
+
+
+func _card_base_score(card_name: String, card_type: String, card_cost: float) -> float:
+	if card_name == "":
+		return 0.0
+	var lower := card_name.to_lower()
+	if _is_curse_or_status(card_name, card_type):
+		return -1.2
+	if _is_basic_strike(card_name):
+		return -0.35
+	if _is_basic_defend(card_name):
+		return -0.20
+
+	var score := 0.12
+	if card_type.contains("attack"):
+		score += 0.08
+	elif card_type.contains("skill"):
+		score += 0.12
+	elif card_type.contains("power"):
+		score += 0.22
+	if card_cost >= 0.0 and card_cost <= 1.0:
+		score += 0.08
+	elif card_cost >= 3.0:
+		score -= 0.05
+	if lower.contains("+"):
+		score += 0.15
+	return clampf(score, -1.2, 1.0)
+
+
+func _is_basic_card(card_name: String) -> bool:
+	return _is_basic_strike(card_name) or _is_basic_defend(card_name)
+
+
+func _is_basic_strike(card_name: String) -> bool:
+	var lower := card_name.to_lower()
+	return lower == "strike" or lower.contains("strike") or lower.contains("타격")
+
+
+func _is_basic_defend(card_name: String) -> bool:
+	var lower := card_name.to_lower()
+	return lower == "defend" or lower.contains("defend") or lower.contains("수비") or lower.contains("방어")
+
+
+func _is_curse_or_status(card_name: String, card_type: String) -> bool:
+	var lower := card_name.to_lower()
+	var lower_type := card_type.to_lower()
+	if lower_type.contains("curse") or lower_type.contains("status") or lower_type.contains("저주") or lower_type.contains("상태"):
+		return true
+	var needles := [
+		"curse",
+		"status",
+		"wound",
+		"burn",
+		"slimed",
+		"dazed",
+		"void",
+		"regret",
+		"injury",
+		"shame",
+		"pain",
+		"doubt",
+		"normality",
+		"parasite",
+		"저주",
+		"상처",
+		"화상",
+		"점액"
+	]
+	for needle in needles:
+		if lower.contains(needle):
+			return true
+	return false
+
+
 func reset_learning(delete_log := false) -> void:
 	weights.clear()
+	action_weights.clear()
 	total_observed_steps = 0
 	save_model()
 	if delete_log and FileAccess.file_exists(RUN_LOG_PATH):
@@ -314,6 +551,7 @@ func _load_model() -> void:
 		save_model()
 		return
 	weights = model.get("weights", {})
+	action_weights = model.get("action_weights", {})
 	total_observed_steps = int(model.get("total_observed_steps", 0))
 
 

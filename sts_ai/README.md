@@ -7,11 +7,13 @@ empty stubs. This prototype therefore starts as an external learner:
 1. Read catalog data from `Slay the Spire 2/localization/eng`.
 2. Record one run as JSONL decision steps.
 3. Update a TD(0) value function after each observed transition.
-4. Use the learned value estimate to rank legal actions.
+4. Use the learned state and action estimates to rank legal actions.
 
-The core idea is deliberately small: learn `V(state)` during a run, and choose
-the action whose estimated next-state value is best. Once a real game hook or
-screen parser exists, it only needs to emit the same JSONL schema.
+The core idea is deliberately small: learn `V(state)` during a run, then score
+each choice as `V(predicted_state) + A(state, action)`. Card actions get a
+small heuristic seed and learned action weights, so remove, transform, upgrade,
+and pick decisions can treat weak basics, curses, duplicates, and upgraded cards
+differently before enough run data has accumulated.
 
 ## Files
 

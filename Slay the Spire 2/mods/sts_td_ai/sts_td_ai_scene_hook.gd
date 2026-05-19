@@ -285,24 +285,49 @@ func _collect_deck_card_selection_actions(root: Node, screen: String) -> Array:
 	if !confirm_actions.is_empty():
 		return confirm_actions
 
+	var action_type := _deck_card_action_type(screen_node, screen)
 	var actions := []
 	for grid in _collect_controls_by_name_fragment(screen_node, "CardGrid"):
-		actions.append_array(_collect_card_holder_actions(grid, "select_deck_card"))
+		actions.append_array(_collect_card_holder_actions(grid, action_type))
 	if actions.is_empty():
-		actions.append_array(_collect_card_holder_actions(screen_node, "select_deck_card"))
+		actions.append_array(_collect_card_holder_actions(screen_node, action_type))
 	if actions.is_empty():
 		for node in _collect_clickable_controls(screen_node, true, true):
 			if _has_ancestor_name_fragment(node, "cardgrid") or String(node.name).to_lower().contains("card"):
-				actions.append(_make_node_action("select_deck_card", node))
+				actions.append(_make_node_action(action_type, node))
 	return _dedupe_actions(actions)
 
 
 func _collect_visible_confirm_actions(root: Node) -> Array:
 	var actions := []
+	if !_has_visible_preview_container(root):
+		return actions
 	for node in _collect_controls_by_name_fragment(root, "Confirm"):
 		if node is Control and node.is_visible_in_tree():
 			actions.append(_make_node_action("confirm_card_selection", node))
 	return _dedupe_actions(actions)
+
+
+func _deck_card_action_type(root: Node, screen: String) -> String:
+	var text := " ".join(_collect_visible_labels(root, 80)).to_lower()
+	if text.contains("remove") or text.contains("제거") or text.contains("삭제"):
+		return "remove_card"
+	if text.contains("transform") or text.contains("변화") or text.contains("변형"):
+		return "transform_card"
+	if text.contains("upgrade") or text.contains("강화"):
+		return "upgrade_card"
+	if text.contains("enchant") or text.contains("부여") or text.contains("인챈트"):
+		return "enchant_card"
+	match screen:
+		"TransformSelectScreen":
+			return "transform_card"
+		"DeckUpgradeSelectScreen":
+			return "upgrade_card"
+		"DeckEnchantSelectScreen":
+			return "enchant_card"
+		"DeckCardSelectScreen":
+			return "remove_card"
+	return "select_deck_card"
 
 
 func _collect_card_holder_actions(root: Node, action_type: String) -> Array:
@@ -370,12 +395,18 @@ func _collect_named_control_actions(root: Node, names: Array, action_type: Strin
 
 func _make_node_action(action_type: String, node: Control) -> Dictionary:
 	var label := _best_label_for_node(node)
+	var card_name := _best_card_name_for_node(node)
+	var card_type := _best_named_label_for_node(node, "TypeLabel")
+	var card_cost := _first_number(_best_named_label_for_node(node, "EnergyLabel"))
 	return {
 		"type": action_type,
-		"id": label if label != "" else String(node.name),
+		"id": card_name if card_name != "" else (label if label != "" else String(node.name)),
 		"node_path": str(node.get_path()),
 		"node_name": String(node.name),
-		"label": label
+		"label": card_name if card_name != "" else label,
+		"card_name": card_name,
+		"card_type": card_type,
+		"card_cost": card_cost
 	}
 
 
@@ -559,6 +590,20 @@ func _has_ancestor_name_fragment(node: Node, fragment: String) -> bool:
 	return false
 
 
+func _has_visible_preview_container(root: Node) -> bool:
+	return _has_visible_preview_container_recursive(root)
+
+
+func _has_visible_preview_container_recursive(node: Node) -> bool:
+	if String(node.name).to_lower().contains("previewcontainer"):
+		if !(node is CanvasItem) or node.is_visible_in_tree():
+			return true
+	for child in node.get_children():
+		if _has_visible_preview_container_recursive(child):
+			return true
+	return false
+
+
 func _dedupe_actions(actions: Array) -> Array:
 	var seen := {}
 	var deduped := []
@@ -658,6 +703,28 @@ func _best_label_for_node(node: Node) -> String:
 		if !labels.is_empty():
 			return String(labels[0])
 	return String(node.name)
+
+
+func _best_card_name_for_node(node: Node) -> String:
+	var title := _best_named_label_for_node(node, "TitleLabel")
+	if title != "":
+		return title
+	var parent := node.get_parent()
+	while parent != null:
+		title = _best_named_label_for_node(parent, "TitleLabel")
+		if title != "":
+			return title
+		parent = parent.get_parent()
+	return ""
+
+
+func _best_named_label_for_node(node: Node, target_name: String) -> String:
+	var found := _find_visible_node_by_name(node, target_name)
+	if found != null and (found is Label or found is RichTextLabel):
+		var text := String(found.text).strip_edges()
+		if text != "":
+			return text.left(MAX_LABEL_TEXT)
+	return ""
 
 
 func _extract_number_after(labels: Array, keys: Array) -> float:

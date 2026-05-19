@@ -38,7 +38,10 @@ StsTdAi.save_model()
 ```
 
 `actions` may include `predicted_state`. If present, ranking uses the estimated
-value of that predicted state.
+value of that predicted state plus the action value for the current choice.
+Card actions also include a small card heuristic and learned action weights, so
+remove/transform/upgrade/pick decisions can prefer removing weak basics or
+curses while preserving higher-value cards for upgrades.
 
 Example action:
 
@@ -46,6 +49,9 @@ Example action:
 {
   "type": "pick_card",
   "id": "POMMEL_STRIKE",
+  "card_name": "Pommel Strike",
+  "card_type": "attack",
+  "card_cost": 1,
   "predicted_state": {
     "hp": 66,
     "max_hp": 80,
