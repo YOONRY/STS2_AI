@@ -267,8 +267,12 @@ class FeatureExtractor:
 class LinearTDValue:
     alpha: float = 0.05
     gamma: float = 0.98
+    trace_lambda: float = 0.75
+    replay_passes: int = 2
     weights: dict[str, float] = field(default_factory=dict)
     action_weights: dict[str, float] = field(default_factory=dict)
+    value_traces: dict[str, float] = field(default_factory=dict, repr=False)
+    action_traces: dict[str, float] = field(default_factory=dict, repr=False)
     extractor: FeatureExtractor = field(default_factory=FeatureExtractor)
 
     def value(self, state: JsonObject) -> float:
@@ -281,14 +285,47 @@ class LinearTDValue:
         )
         return learned + card_action_heuristic(state, action)
 
-    def update(self, state: JsonObject, reward: float, next_state: JsonObject, done: bool) -> float:
+    def reset_traces(self) -> None:
+        self.value_traces.clear()
+        self.action_traces.clear()
+
+    def _accumulate_trace(self, traces: dict[str, float], features: dict[str, float]) -> None:
+        decay = self.gamma * self.trace_lambda
+        if decay <= 0:
+            traces.clear()
+        else:
+            for name in list(traces):
+                traces[name] *= decay
+                if abs(traces[name]) < 1e-6:
+                    del traces[name]
+        for name, amount in features.items():
+            traces[name] = traces.get(name, 0.0) + amount
+
+    def _apply_trace_update(self, weights: dict[str, float], traces: dict[str, float], error: float) -> None:
+        for name, amount in traces.items():
+            weights[name] = weights.get(name, 0.0) + self.alpha * error * amount
+
+    def update(
+        self,
+        state: JsonObject,
+        reward: float,
+        next_state: JsonObject,
+        done: bool,
+        use_trace: bool = True,
+    ) -> float:
         features = self.extractor.extract(state)
         current = sum(self.weights.get(name, 0.0) * amount for name, amount in features.items())
         bootstrap = 0.0 if done else self.value(next_state)
         target = reward + self.gamma * bootstrap
         error = target - current
-        for name, amount in features.items():
-            self.weights[name] = self.weights.get(name, 0.0) + self.alpha * error * amount
+        if use_trace and self.trace_lambda > 0:
+            self._accumulate_trace(self.value_traces, features)
+            self._apply_trace_update(self.weights, self.value_traces, error)
+        else:
+            for name, amount in features.items():
+                self.weights[name] = self.weights.get(name, 0.0) + self.alpha * error * amount
+        if done:
+            self.value_traces.clear()
         return error
 
     def update_action(
@@ -298,6 +335,7 @@ class LinearTDValue:
         reward: float,
         next_state: JsonObject,
         done: bool,
+        use_trace: bool = True,
     ) -> float:
         features = self.extractor.extract_action(state, action)
         if not features:
@@ -306,14 +344,22 @@ class LinearTDValue:
         bootstrap = 0.0 if done else self.value(next_state)
         target = reward + self.gamma * bootstrap
         error = target - current
-        for name, amount in features.items():
-            self.action_weights[name] = self.action_weights.get(name, 0.0) + self.alpha * error * amount
+        if use_trace and self.trace_lambda > 0:
+            self._accumulate_trace(self.action_traces, features)
+            self._apply_trace_update(self.action_weights, self.action_traces, error)
+        else:
+            for name, amount in features.items():
+                self.action_weights[name] = self.action_weights.get(name, 0.0) + self.alpha * error * amount
+        if done:
+            self.action_traces.clear()
         return error
 
     def to_json(self) -> JsonObject:
         return {
             "alpha": self.alpha,
             "gamma": self.gamma,
+            "trace_lambda": self.trace_lambda,
+            "replay_passes": self.replay_passes,
             "hash_buckets": self.extractor.hash_buckets,
             "weights": self.weights,
             "action_weights": self.action_weights,
@@ -324,6 +370,8 @@ class LinearTDValue:
         return cls(
             alpha=float(payload.get("alpha", 0.05)),
             gamma=float(payload.get("gamma", 0.98)),
+            trace_lambda=float(payload.get("trace_lambda", 0.75)),
+            replay_passes=int(payload.get("replay_passes", 2)),
             weights={str(k): float(v) for k, v in payload.get("weights", {}).items()},
             action_weights={str(k): float(v) for k, v in payload.get("action_weights", {}).items()},
             extractor=FeatureExtractor(hash_buckets=int(payload.get("hash_buckets", 256))),
@@ -342,11 +390,17 @@ def read_jsonl(path: Path) -> Iterable[JsonObject]:
                 raise ValueError(f"{path}:{line_number}: invalid JSONL") from exc
 
 
-def load_model(path: Path | None, alpha: float, gamma: float) -> LinearTDValue:
+def load_model(
+    path: Path | None,
+    alpha: float,
+    gamma: float,
+    trace_lambda: float = 0.75,
+    replay_passes: int = 2,
+) -> LinearTDValue:
     if path is not None and path.exists():
         with path.open("r", encoding="utf-8") as handle:
             return LinearTDValue.from_json(json.load(handle))
-    return LinearTDValue(alpha=alpha, gamma=gamma)
+    return LinearTDValue(alpha=alpha, gamma=gamma, trace_lambda=trace_lambda, replay_passes=replay_passes)
 
 
 def save_model(path: Path, model: LinearTDValue) -> None:
@@ -355,37 +409,72 @@ def save_model(path: Path, model: LinearTDValue) -> None:
         json.dump(model.to_json(), handle, indent=2, sort_keys=True)
 
 
-def train(args: argparse.Namespace) -> None:
-    model = load_model(args.model, args.alpha, args.gamma)
-    steps = 0
-    abs_error = 0.0
-    for step in read_jsonl(args.run_log):
-        state_error = model.update(
-            state=step["state"],
-            reward=float(step["reward"]),
-            next_state=step["next_state"],
-            done=bool(step["done"]),
-        )
-        errors = [state_error]
-        action = step.get("action")
-        if isinstance(action, dict):
-            errors.append(
-                model.update_action(
-                    state=step["state"],
-                    action=action,
-                    reward=float(step["reward"]),
-                    next_state=step["next_state"],
-                    done=bool(step["done"]),
-                )
+def training_step_priority(step: JsonObject) -> float:
+    reward_priority = abs(safe_float(step.get("reward"), 0.0))
+    state = step.get("state", {})
+    next_state = step.get("next_state", {})
+    hp_loss = 0.0
+    floor_gain = 0.0
+    if isinstance(state, dict) and isinstance(next_state, dict):
+        max_hp = max(safe_float(state.get("max_hp"), 1.0), 1.0)
+        hp_loss = max(safe_float(state.get("hp"), 0.0) - safe_float(next_state.get("hp"), 0.0), 0.0) / max_hp
+        floor_gain = max(
+            safe_float(next_state.get("floor"), 0.0) - safe_float(state.get("floor"), 0.0),
+            0.0,
+        ) / 60.0
+    terminal_bonus = 1.0 if bool(step.get("done", False)) else 0.0
+    return reward_priority + hp_loss * 0.5 + floor_gain * 0.2 + terminal_bonus
+
+
+def update_from_step(model: LinearTDValue, step: JsonObject, use_trace: bool) -> float:
+    state_error = model.update(
+        state=step["state"],
+        reward=safe_float(step.get("reward"), 0.0),
+        next_state=step["next_state"],
+        done=bool(step.get("done", False)),
+        use_trace=use_trace,
+    )
+    errors = [state_error]
+    action = step.get("action")
+    if isinstance(action, dict):
+        errors.append(
+            model.update_action(
+                state=step["state"],
+                action=action,
+                reward=safe_float(step.get("reward"), 0.0),
+                next_state=step["next_state"],
+                done=bool(step.get("done", False)),
+                use_trace=use_trace,
             )
-        steps += 1
-        abs_error += abs(sum(errors) / len(errors))
+        )
+    return sum(errors) / len(errors)
+
+
+def train(args: argparse.Namespace) -> None:
+    model = load_model(args.model, args.alpha, args.gamma, args.trace_lambda, args.replay_passes)
+    model.trace_lambda = max(0.0, min(float(model.trace_lambda), 1.0))
+    model.replay_passes = max(int(args.replay_passes or model.replay_passes), 1)
+    steps = list(read_jsonl(args.run_log))
+    updates = 0
+    abs_error = 0.0
+    for pass_index in range(model.replay_passes):
+        ordered = steps if pass_index == 0 else sorted(steps, key=training_step_priority, reverse=True)
+        use_trace = pass_index == 0
+        model.reset_traces()
+        for step in ordered:
+            if not use_trace:
+                model.reset_traces()
+            abs_error += abs(update_from_step(model, step, use_trace=use_trace))
+            updates += 1
+        model.reset_traces()
 
     save_model(args.model, model)
-    mean_error = abs_error / max(steps, 1)
+    mean_error = abs_error / max(updates, 1)
     print(
-        f"trained {steps} steps, mean_abs_td_error={mean_error:.4f}, "
-        f"weights={len(model.weights)}, action_weights={len(model.action_weights)}"
+        f"trained {len(steps)} steps x {model.replay_passes} passes, "
+        f"updates={updates}, mean_abs_td_error={mean_error:.4f}, "
+        f"trace_lambda={model.trace_lambda:.2f}, weights={len(model.weights)}, "
+        f"action_weights={len(model.action_weights)}"
     )
 
 
@@ -413,7 +502,7 @@ def rank(args: argparse.Namespace) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Small TD(0) value learner for STS2 runs.")
+    parser = argparse.ArgumentParser(description="Small TD(lambda) value learner for STS2 runs.")
     subparsers = parser.add_subparsers(required=True)
 
     train_parser = subparsers.add_parser("train")
@@ -421,6 +510,8 @@ def build_parser() -> argparse.ArgumentParser:
     train_parser.add_argument("--model", type=Path, required=True)
     train_parser.add_argument("--alpha", type=float, default=0.05)
     train_parser.add_argument("--gamma", type=float, default=0.98)
+    train_parser.add_argument("--trace-lambda", type=float, default=0.75)
+    train_parser.add_argument("--replay-passes", type=int, default=2)
     train_parser.set_defaults(func=train)
 
     rank_parser = subparsers.add_parser("rank")

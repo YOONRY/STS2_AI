@@ -12,6 +12,8 @@ const DEFAULT_ALPHA := 0.05
 const DEFAULT_GAMMA := 0.98
 const DEFAULT_EPSILON := 0.05
 const DEFAULT_HASH_BUCKETS := 256
+const DEFAULT_TRACE_LAMBDA := 0.75
+const DEFAULT_REPLAY_PASSES := 2
 const HUD_UPDATE_INTERVAL := 0.4
 const CARD_ACTION_TYPES := [
 	"pick_card",
@@ -28,9 +30,13 @@ var alpha := DEFAULT_ALPHA
 var gamma := DEFAULT_GAMMA
 var epsilon := DEFAULT_EPSILON
 var hash_buckets := DEFAULT_HASH_BUCKETS
+var trace_lambda := DEFAULT_TRACE_LAMBDA
+var replay_passes := DEFAULT_REPLAY_PASSES
 var auto_play_enabled := false
 var weights := {}
 var action_weights := {}
+var value_traces := {}
+var action_traces := {}
 var total_observed_steps := 0
 var last_context := {}
 var last_ranked_actions := []
@@ -90,7 +96,10 @@ func observe_step(state: Dictionary, action: Dictionary, reward: float, next_sta
 	step_observed.emit(step)
 	model_updated.emit(1, absf(error))
 	if done:
-		save_model()
+		if replay_passes > 1:
+			train_from_log(RUN_LOG_PATH, replay_passes)
+		else:
+			save_model()
 	return error
 
 
@@ -106,7 +115,7 @@ func value(state: Dictionary) -> float:
 	return result
 
 
-func update_value(state: Dictionary, reward: float, next_state: Dictionary, done: bool) -> float:
+func update_value(state: Dictionary, reward: float, next_state: Dictionary, done: bool, use_trace := true) -> float:
 	var features := extract_features(state)
 	var current := 0.0
 	for feature_name in features.keys():
@@ -116,13 +125,20 @@ func update_value(state: Dictionary, reward: float, next_state: Dictionary, done
 	var target: float = reward + gamma * bootstrap
 	var error: float = target - current
 
-	for feature_name in features.keys():
-		weights[feature_name] = float(weights.get(feature_name, 0.0)) + alpha * error * float(features[feature_name])
+	if use_trace and trace_lambda > 0.0:
+		_accumulate_traces(value_traces, features)
+		_apply_trace_update(weights, value_traces, error)
+	else:
+		for feature_name in features.keys():
+			weights[feature_name] = float(weights.get(feature_name, 0.0)) + alpha * error * float(features[feature_name])
+
+	if done:
+		value_traces.clear()
 
 	return error
 
 
-func update_action_value(state: Dictionary, action: Dictionary, reward: float, next_state: Dictionary, done: bool) -> float:
+func update_action_value(state: Dictionary, action: Dictionary, reward: float, next_state: Dictionary, done: bool, use_trace := true) -> float:
 	if action.is_empty():
 		return 0.0
 	var features := extract_action_features(state, action)
@@ -134,8 +150,15 @@ func update_action_value(state: Dictionary, action: Dictionary, reward: float, n
 	var target: float = reward + gamma * bootstrap
 	var error: float = target - current
 
-	for feature_name in features.keys():
-		action_weights[feature_name] = float(action_weights.get(feature_name, 0.0)) + alpha * error * float(features[feature_name])
+	if use_trace and trace_lambda > 0.0:
+		_accumulate_traces(action_traces, features)
+		_apply_trace_update(action_weights, action_traces, error)
+	else:
+		for feature_name in features.keys():
+			action_weights[feature_name] = float(action_weights.get(feature_name, 0.0)) + alpha * error * float(features[feature_name])
+
+	if done:
+		action_traces.clear()
 
 	return error
 
@@ -203,17 +226,17 @@ func execute_best_ranked_action() -> Dictionary:
 	return action if action is Dictionary else {}
 
 
-func train_from_log(path := RUN_LOG_PATH) -> Dictionary:
+func train_from_log(path := RUN_LOG_PATH, passes := -1) -> Dictionary:
 	var file := FileAccess.open(path, FileAccess.READ)
 	if file == null:
 		return {
 			"steps": 0,
+			"updates": 0,
 			"mean_abs_td_error": 0.0,
 			"message": "No run log found."
 		}
 
-	var steps := 0
-	var abs_error := 0.0
+	var steps := []
 	while !file.eof_reached():
 		var line := file.get_line().strip_edges()
 		if line == "":
@@ -223,30 +246,55 @@ func train_from_log(path := RUN_LOG_PATH) -> Dictionary:
 			continue
 		if !parsed.has("state") or !parsed.has("next_state"):
 			continue
-		var state_error: float = update_value(
-			parsed["state"],
-			float(parsed.get("reward", 0.0)),
-			parsed["next_state"],
-			bool(parsed.get("done", false))
-		)
-		var action_error := 0.0
-		var action = parsed.get("action", {})
-		if action is Dictionary:
-			action_error = update_action_value(
+		steps.append({
+			"step": parsed,
+			"priority": _training_step_priority(parsed)
+		})
+
+	var pass_count: int = replay_passes if passes < 1 else passes
+	pass_count = max(pass_count, 1)
+	var updates := 0
+	var abs_error := 0.0
+
+	for pass_index in range(pass_count):
+		var ordered := steps.duplicate()
+		var use_trace := pass_index == 0
+		if pass_index > 0:
+			ordered.sort_custom(func(a, b): return float(a["priority"]) > float(b["priority"]))
+		reset_eligibility_traces()
+		for item in ordered:
+			var parsed: Dictionary = item["step"]
+			if !use_trace:
+				reset_eligibility_traces()
+			var state_error: float = update_value(
 				parsed["state"],
-				action,
 				float(parsed.get("reward", 0.0)),
 				parsed["next_state"],
-				bool(parsed.get("done", false))
+				bool(parsed.get("done", false)),
+				use_trace
 			)
-		steps += 1
-		abs_error += absf((state_error + action_error) * 0.5)
+			var action_error := 0.0
+			var action = parsed.get("action", {})
+			if action is Dictionary:
+				action_error = update_action_value(
+					parsed["state"],
+					action,
+					float(parsed.get("reward", 0.0)),
+					parsed["next_state"],
+					bool(parsed.get("done", false)),
+					use_trace
+				)
+			updates += 1
+			abs_error += absf((state_error + action_error) * 0.5)
+		reset_eligibility_traces()
 
 	save_model()
-	var mean_error: float = abs_error / float(max(steps, 1))
-	model_updated.emit(steps, mean_error)
+	var mean_error: float = abs_error / float(max(updates, 1))
+	model_updated.emit(updates, mean_error)
 	return {
-		"steps": steps,
+		"steps": steps.size(),
+		"updates": updates,
+		"replay_passes": pass_count,
 		"mean_abs_td_error": mean_error,
 		"message": "Training complete."
 	}
@@ -258,6 +306,8 @@ func save_model() -> void:
 		"gamma": gamma,
 		"epsilon": epsilon,
 		"hash_buckets": hash_buckets,
+		"trace_lambda": trace_lambda,
+		"replay_passes": replay_passes,
 		"weights": weights,
 		"action_weights": action_weights,
 		"total_observed_steps": total_observed_steps,
@@ -271,6 +321,8 @@ func save_settings() -> void:
 		"gamma": gamma,
 		"epsilon": epsilon,
 		"hash_buckets": hash_buckets,
+		"trace_lambda": trace_lambda,
+		"replay_passes": replay_passes,
 		"auto_play_enabled": auto_play_enabled,
 		"hud_enabled": _hud_enabled
 	})
@@ -525,9 +577,53 @@ func _is_curse_or_status(card_name: String, card_type: String) -> bool:
 	return false
 
 
+func reset_eligibility_traces() -> void:
+	value_traces.clear()
+	action_traces.clear()
+
+
+func _accumulate_traces(traces: Dictionary, features: Dictionary) -> void:
+	var decay := gamma * trace_lambda
+	if decay <= 0.0:
+		traces.clear()
+	else:
+		var expired := []
+		for feature_name in traces.keys():
+			var decayed := float(traces[feature_name]) * decay
+			if absf(decayed) < 0.000001:
+				expired.append(feature_name)
+			else:
+				traces[feature_name] = decayed
+		for feature_name in expired:
+			traces.erase(feature_name)
+
+	for feature_name in features.keys():
+		traces[feature_name] = float(traces.get(feature_name, 0.0)) + float(features[feature_name])
+
+
+func _apply_trace_update(weight_table: Dictionary, traces: Dictionary, error: float) -> void:
+	for feature_name in traces.keys():
+		weight_table[feature_name] = float(weight_table.get(feature_name, 0.0)) + alpha * error * float(traces[feature_name])
+
+
+func _training_step_priority(step: Dictionary) -> float:
+	var reward_priority := absf(float(step.get("reward", 0.0)))
+	var state = step.get("state", {})
+	var next_state = step.get("next_state", {})
+	var hp_loss := 0.0
+	var floor_gain := 0.0
+	if state is Dictionary and next_state is Dictionary:
+		var max_hp := maxf(float(state.get("max_hp", 1.0)), 1.0)
+		hp_loss = maxf(float(state.get("hp", 0.0)) - float(next_state.get("hp", 0.0)), 0.0) / max_hp
+		floor_gain = maxf(float(next_state.get("floor", 0.0)) - float(state.get("floor", 0.0)), 0.0) / 60.0
+	var terminal_bonus := 1.0 if bool(step.get("done", false)) else 0.0
+	return reward_priority + hp_loss * 0.5 + floor_gain * 0.2 + terminal_bonus
+
+
 func reset_learning(delete_log := false) -> void:
 	weights.clear()
 	action_weights.clear()
+	reset_eligibility_traces()
 	total_observed_steps = 0
 	save_model()
 	if delete_log and FileAccess.file_exists(RUN_LOG_PATH):
@@ -562,6 +658,8 @@ func _load_settings() -> void:
 	gamma = float(settings.get("gamma", DEFAULT_GAMMA))
 	epsilon = float(settings.get("epsilon", DEFAULT_EPSILON))
 	hash_buckets = int(settings.get("hash_buckets", DEFAULT_HASH_BUCKETS))
+	trace_lambda = clampf(float(settings.get("trace_lambda", DEFAULT_TRACE_LAMBDA)), 0.0, 1.0)
+	replay_passes = max(int(settings.get("replay_passes", DEFAULT_REPLAY_PASSES)), 1)
 	auto_play_enabled = bool(settings.get("auto_play_enabled", false))
 	_hud_enabled = bool(settings.get("hud_enabled", true))
 
@@ -573,6 +671,8 @@ func _load_model() -> void:
 		return
 	weights = model.get("weights", {})
 	action_weights = model.get("action_weights", {})
+	trace_lambda = clampf(float(model.get("trace_lambda", trace_lambda)), 0.0, 1.0)
+	replay_passes = max(int(model.get("replay_passes", replay_passes)), 1)
 	total_observed_steps = int(model.get("total_observed_steps", 0))
 
 

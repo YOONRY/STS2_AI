@@ -24,7 +24,22 @@ Files:
 
 - `model.json`: TD value weights.
 - `run_steps.jsonl`: observed transitions from runs.
-- `settings.json`: alpha, gamma, epsilon, and hash bucket settings.
+- `settings.json`: alpha, gamma, epsilon, trace lambda, replay passes, and hash bucket settings.
+
+## Learning
+
+The learner now uses TD(lambda) traces for online updates:
+
+```text
+delta = r + gamma * V(s') - V(s)
+e_i = gamma * lambda * e_i + feature_i(s)
+w_i = w_i + alpha * delta * e_i
+```
+
+The default `lambda` is `0.75`. At run end, `train_from_log()` can replay the
+recorded JSONL log; pass 1 keeps chronological traces, and later passes replay
+high-priority transitions such as terminal states, high reward, HP loss, and
+floor progress without carrying traces across unrelated steps.
 
 ## API
 

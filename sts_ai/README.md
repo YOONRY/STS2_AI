@@ -6,7 +6,7 @@ empty stubs. This prototype therefore starts as an external learner:
 
 1. Read catalog data from `Slay the Spire 2/localization/eng`.
 2. Record one run as JSONL decision steps.
-3. Update a TD(0) value function after each observed transition.
+3. Update a TD(lambda) value function after each observed transition.
 4. Use the learned state and action estimates to rank legal actions.
 
 The core idea is deliberately small: learn `V(state)` during a run, then score
@@ -16,6 +16,17 @@ and pick decisions can treat weak basics, curses, duplicates, and upgraded cards
 differently before enough run data has accumulated.
 Deck-size interaction features use `thin <= 20`, `medium 20..30`, and
 `thick >= 30`, with boundary values allowed to activate both adjacent signals.
+
+Online updates use eligibility traces:
+
+```text
+delta = r + gamma * V(s') - V(s)
+e_i = gamma * lambda * e_i + feature_i(s)
+w_i = w_i + alpha * delta * e_i
+```
+
+Training also supports replay. The first pass keeps chronological traces; later
+passes prioritize terminal states, high reward, HP loss, and floor progress.
 
 ## Files
 
@@ -28,7 +39,7 @@ Deck-size interaction features use `thin <= 20`, `medium 20..30`, and
 
 ```powershell
 python sts_ai/tools/extract_catalog.py --game-dir "Slay the Spire 2" --out sts_ai/catalog.json
-python sts_ai/td_agent.py train --run-log sts_ai/examples/sample_run.jsonl --model sts_ai/model.json
+python sts_ai/td_agent.py train --run-log sts_ai/examples/sample_run.jsonl --model sts_ai/model.json --trace-lambda 0.75 --replay-passes 2
 python sts_ai/td_agent.py rank --model sts_ai/model.json --state sts_ai/examples/state.json
 ```
 
