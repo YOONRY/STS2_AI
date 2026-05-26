@@ -380,11 +380,10 @@ func _collect_card_choice_actions(root: Node, screen: String) -> Array:
 	var actions := []
 	var card_row := _find_visible_node_by_name(screen_node, "CardRow")
 	if card_row != null:
-		actions.append_array(_collect_card_holder_actions(card_row, "choose_card"))
 		actions.append_array(_collect_reward_card_choice_actions(card_row, "choose_card"))
-		for node in _collect_clickable_controls(card_row, false, true):
-			actions.append(_make_node_action("pick_card", node))
 	actions.append_array(_collect_reward_card_choice_actions(screen_node, "choose_card"))
+	if actions.is_empty() and card_row != null:
+		actions.append_array(_collect_card_holder_actions(card_row, "choose_card"))
 	var alternatives := _find_visible_node_by_name(screen_node, "RewardAlternatives")
 	if alternatives != null:
 		for node in _collect_clickable_controls(alternatives, true, true):
@@ -512,42 +511,56 @@ func _collect_card_holder_actions_recursive(node: Node, action_type: String, act
 
 
 func _collect_reward_card_choice_actions(root: Node, action_type: String) -> Array:
+	var scopes := _collect_reward_card_scopes(root)
 	var actions := []
-	_collect_reward_card_choice_actions_recursive(root, action_type, actions)
-	return _dedupe_actions(actions)
+	for scope in scopes:
+		if scope is Control:
+			var target := _card_choice_click_target(scope)
+			if target != null:
+				var action := _make_node_action(action_type, target)
+				action["card_click_rect"] = _control_rect_dict(scope)
+				action["card_click_position"] = _control_center(scope)
+				actions.append(action)
+	return _dedupe_card_choice_actions(actions)
 
 
-func _collect_reward_card_choice_actions_recursive(node: Node, action_type: String, actions: Array) -> void:
+func _collect_reward_card_scopes(root: Node) -> Array:
+	var scopes := []
+	_collect_reward_card_scopes_recursive(root, scopes)
+	scopes.sort_custom(func(a, b):
+		var ar := (a as Control).get_global_rect()
+		var br := (b as Control).get_global_rect()
+		if absf(ar.position.x - br.position.x) > 8.0:
+			return ar.position.x < br.position.x
+		return ar.position.y < br.position.y
+	)
+	return scopes
+
+
+func _collect_reward_card_scopes_recursive(node: Node, scopes: Array) -> void:
 	if node is Control and node.is_visible_in_tree() and !_is_our_hud_node(node):
 		var control := node as Control
-		if _looks_like_reward_card_control(control):
-			var target := _card_choice_click_target(control)
-			if target != null:
-				actions.append(_make_node_action(action_type, target))
+		if _looks_like_reward_card_scope(control):
+			scopes.append(control)
+			return
 	for child in node.get_children():
-		_collect_reward_card_choice_actions_recursive(child, action_type, actions)
+		_collect_reward_card_scopes_recursive(child, scopes)
 
 
-func _looks_like_reward_card_control(control: Control) -> bool:
+func _looks_like_reward_card_scope(control: Control) -> bool:
 	var rect := control.get_global_rect()
-	if rect.size.x < 40.0 or rect.size.y < 60.0:
+	if rect.size.x < 120.0 or rect.size.y < 180.0:
 		return false
-	if rect.size.x > 520.0 or rect.size.y > 720.0:
+	if rect.size.x > 380.0 or rect.size.y > 620.0:
 		return false
 	var lower := String(control.name).to_lower()
 	if lower.contains("screen") or lower.contains("container") or lower.contains("row") or lower.contains("grid"):
 		return false
-	if lower == "hitbox":
-		return (
-			_has_ancestor_name_fragment(control, "cardholder") or
-			_has_ancestor_name_fragment(control, "cardreward") or
-			_has_ancestor_name_fragment(control, "rewardcard") or
-			_has_ancestor_name_fragment(control, "cardchoice") or
-			_has_ancestor_name_fragment(control, "cardoption")
-		)
-	if lower.contains("cardholder") or lower.contains("cardreward") or lower.contains("rewardcard") or lower.contains("cardchoice") or lower.contains("cardoption"):
+	if _best_named_label_for_node(control, "TitleLabel") == "":
+		return false
+	if _has_ancestor_name_fragment(control, "cardreward") or _has_ancestor_name_fragment(control, "rewardcard"):
 		return true
-	return _best_named_label_for_node(control, "TitleLabel") != ""
+	return lower.contains("cardholder") or lower.contains("cardreward") or lower.contains("rewardcard") or lower.contains("cardchoice") or lower.contains("cardoption") or lower.contains("card")
 
 
 func _card_choice_click_target(control: Control) -> Control:
@@ -586,9 +599,10 @@ func _collect_rewards_screen_card_selection_actions(root: Node) -> Array:
 
 	var card_row := _find_visible_node_by_name(root, "CardRow")
 	if card_row != null:
-		actions.append_array(_collect_card_holder_actions(card_row, "choose_card"))
 		actions.append_array(_collect_reward_card_choice_actions(card_row, "choose_card"))
 	actions.append_array(_collect_reward_card_choice_actions(root, "choose_card"))
+	if actions.is_empty():
+		return []
 
 	for node in _collect_controls_by_name_fragments(root, ["SkipButton", "SkipRewardButton", "ProceedButton"]):
 		if node is Control and node.is_visible_in_tree():
@@ -598,13 +612,16 @@ func _collect_rewards_screen_card_selection_actions(root: Node) -> Array:
 
 func _looks_like_card_reward_selection_overlay(root: Node) -> bool:
 	var text := " ".join(_collect_visible_labels(root, 120)).to_lower()
+	var card_scopes := _collect_reward_card_scopes(root)
 	return (
-		text.contains("select a card") or
-		text.contains("choose a card") or
-		text.contains("add a card") or
-		text.contains("카드를 선택") or
-		text.contains("카드 선택") or
-		text.contains("덱에 추가")
+		card_scopes.size() >= 2 and (
+			text.contains("select a card") or
+			text.contains("choose a card") or
+			text.contains("add a card") or
+			text.contains("카드를 선택") or
+			text.contains("카드 선택") or
+			text.contains("덱에 추가")
+		)
 	)
 
 
@@ -704,7 +721,7 @@ func _execute_action(action: Dictionary) -> bool:
 			return false
 		return _play_combat_card(node, action)
 	if _is_card_choice_execution_action(action_type):
-		return _activate_choice_control(node)
+		return _activate_choice_control(node, action)
 	if _prefers_pointer_click(action_type):
 		return _click_control(node)
 	if _invoke_sts_control(node):
@@ -741,13 +758,20 @@ func _is_card_choice_execution_action(action_type: String) -> bool:
 		"choose_card",
 		"reward_alternative",
 		"confirm_card_selection",
-		"skip_card_reward",
-		"claim_reward"
+		"skip_card_reward"
 	].has(action_type)
 
 
-func _activate_choice_control(node: Control) -> bool:
+func _activate_choice_control(node: Control, action := {}) -> bool:
 	var target := _card_choice_click_target(node)
+	if action is Dictionary and action.has("card_click_position"):
+		var position := _choice_click_position(action, node)
+		if target != null:
+			_invoke_sts_control(target)
+		if target != node:
+			_invoke_sts_control(node)
+		if position.x >= 0.0:
+			return _click_pointer(position)
 	if target != null and _invoke_sts_control(target):
 		return true
 	if target != node and _invoke_sts_control(node):
@@ -755,6 +779,13 @@ func _activate_choice_control(node: Control) -> bool:
 	if target != null:
 		return _click_control(target)
 	return _click_control(node)
+
+
+func _choice_click_position(action: Dictionary, node: Control) -> Vector2:
+	var position = action.get("card_click_position", null)
+	if position is Vector2:
+		return position
+	return _control_center(node)
 
 
 func _play_combat_card(node: Control, action: Dictionary) -> bool:
@@ -881,6 +912,16 @@ func _control_center(node: Control) -> Vector2:
 	if rect.size.x <= 0.0 or rect.size.y <= 0.0:
 		return Vector2(-1.0, -1.0)
 	return rect.position + rect.size * 0.5
+
+
+func _control_rect_dict(node: Control) -> Dictionary:
+	var rect := node.get_global_rect()
+	return {
+		"x": rect.position.x,
+		"y": rect.position.y,
+		"w": rect.size.x,
+		"h": rect.size.y
+	}
 
 
 func _click_pointer(position: Vector2) -> bool:
@@ -1151,6 +1192,32 @@ func _dedupe_actions(actions: Array) -> Array:
 		if path == "" or seen.has(path):
 			continue
 		seen[path] = true
+		deduped.append(action)
+		if deduped.size() >= MAX_ACTIONS_PER_SCAN:
+			break
+	return deduped
+
+
+func _dedupe_card_choice_actions(actions: Array) -> Array:
+	var seen := {}
+	var deduped := []
+	for action in actions:
+		if !(action is Dictionary):
+			continue
+		var label := String(action.get("card_name", action.get("label", ""))).strip_edges()
+		var rect = action.get("card_click_rect", {})
+		var key := String(action.get("node_path", ""))
+		if rect is Dictionary:
+			key = "%s:%d:%d:%d:%d" % [
+				label,
+				int(round(float(rect.get("x", 0.0)) / 12.0)),
+				int(round(float(rect.get("y", 0.0)) / 12.0)),
+				int(round(float(rect.get("w", 0.0)) / 12.0)),
+				int(round(float(rect.get("h", 0.0)) / 12.0))
+			]
+		if key == "" or seen.has(key):
+			continue
+		seen[key] = true
 		deduped.append(action)
 		if deduped.size() >= MAX_ACTIONS_PER_SCAN:
 			break
