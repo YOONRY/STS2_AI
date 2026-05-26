@@ -181,6 +181,7 @@ func _detect_context(root: Node) -> Dictionary:
 		"CardRewardSelectionScreen",
 		"ChooseACardSelectionScreen",
 		"ChooseABundleSelectionScreen",
+		"ChooseARelicSelection",
 		"ChooseARelicSelectionScreen",
 		"DeckCardSelectScreen",
 		"TransformSelectScreen",
@@ -241,6 +242,8 @@ func _collect_actions(root: Node, context: Dictionary) -> Array:
 			actions.append_array(_collect_combat_actions(root))
 		"CardRewardSelectionScreen", "ChooseACardSelectionScreen", "ChooseABundleSelectionScreen":
 			actions.append_array(_collect_card_choice_actions(root, screen))
+		"ChooseARelicSelection", "ChooseARelicSelectionScreen":
+			actions.append_array(_collect_relic_choice_actions(root, screen))
 		"DeckCardSelectScreen", "TransformSelectScreen", "DeckUpgradeSelectScreen", "DeckEnchantSelectScreen", "SimpleCardSelectScreen":
 			actions.append_array(_collect_deck_card_selection_actions(root, screen))
 		"RewardsScreen":
@@ -302,6 +305,41 @@ func _collect_card_choice_actions(root: Node, screen: String) -> Array:
 	if actions.is_empty():
 		actions.append_array(_collect_generic_choice_actions(root, screen))
 	return _dedupe_actions(actions)
+
+
+func _collect_relic_choice_actions(root: Node, screen: String) -> Array:
+	var screen_node := _find_visible_node_by_name(root, screen)
+	if screen_node == null:
+		screen_node = _find_visible_node_by_name(root, "ChooseARelicSelection")
+	if screen_node == null:
+		screen_node = root
+
+	var actions := []
+	var relic_row := _find_visible_node_by_name(screen_node, "RelicRow")
+	if relic_row != null:
+		actions.append_array(_collect_relic_holder_actions(relic_row, "choose_relic"))
+	if actions.is_empty():
+		actions.append_array(_collect_relic_holder_actions(screen_node, "choose_relic"))
+	for node in _collect_controls_by_name_fragment(screen_node, "SkipButton"):
+		actions.append(_make_node_action("skip_relic", node))
+	return _dedupe_actions(actions)
+
+
+func _collect_relic_holder_actions(root: Node, action_type: String) -> Array:
+	var actions := []
+	_collect_relic_holder_actions_recursive(root, action_type, actions)
+	return _dedupe_actions(actions)
+
+
+func _collect_relic_holder_actions_recursive(node: Node, action_type: String, actions: Array) -> void:
+	if node is Control and node.is_visible_in_tree() and !_is_our_hud_node(node):
+		var lower := String(node.name).to_lower()
+		if lower == "hitbox" and _has_ancestor_name_fragment(node, "relic"):
+			actions.append(_make_node_action(action_type, node))
+		elif lower.contains("relicbasicholder") or lower.contains("treasurerelicholder") or lower.contains("relicinventoryholder"):
+			actions.append(_make_node_action(action_type, node))
+	for child in node.get_children():
+		_collect_relic_holder_actions_recursive(child, action_type, actions)
 
 
 func _collect_deck_card_selection_actions(root: Node, screen: String, search_global_overlay := false) -> Array:
@@ -481,7 +519,9 @@ func _invoke_sts_control(node: Control) -> bool:
 		node_name.contains("cardrewardalternativebutton") or
 		node_name.contains("proceedbutton") or
 		node_name.contains("skipbutton") or
-		node_name.contains("confirm")
+		node_name.contains("confirm") or
+		node_name.contains("relic") or
+		node_name.contains("hitbox")
 	)
 	if !should_try:
 		return false
@@ -573,6 +613,8 @@ func _is_clickable_control(control: Control, permissive: bool) -> bool:
 		return false
 	if control is Label or control is RichTextLabel:
 		return false
+	if _looks_like_passive_container(control):
+		return false
 	if control is BaseButton or control.has_signal("pressed"):
 		return true
 	if _looks_like_action_control(control):
@@ -586,11 +628,26 @@ func _looks_like_action_control(node: Node) -> bool:
 	var lower := String(node.name).to_lower()
 	return (
 		lower.contains("button") or
-		lower.contains("choice") or
 		lower.contains("option") or
-		lower.contains("reward") or
+		lower.contains("hitbox") or
 		lower.contains("proceed") or
 		lower.contains("skip")
+	)
+
+
+func _looks_like_passive_container(node: Node) -> bool:
+	var lower := String(node.name).to_lower()
+	return (
+		lower.contains("container") or
+		lower.contains("screen") or
+		lower.contains("panel") or
+		lower.contains("background") or
+		lower.contains("mask") or
+		lower.contains("banner") or
+		lower.contains("header") or
+		lower.contains("description") or
+		lower.contains("row") or
+		lower.contains("grid")
 	)
 
 
