@@ -257,7 +257,7 @@ func _collect_actions(root: Node, context: Dictionary) -> Array:
 func _collect_embedded_deck_card_selection_actions(root: Node, screen: String) -> Array:
 	if !["EventRoom", "MerchantRoom", "RestSiteRoom", "TreasureRoom"].has(screen):
 		return []
-	var actions := _collect_deck_card_selection_actions(root, screen)
+	var actions := _collect_deck_card_selection_actions(root, screen, true)
 	var deck_actions := []
 	for action in actions:
 		if !(action is Dictionary):
@@ -304,8 +304,8 @@ func _collect_card_choice_actions(root: Node, screen: String) -> Array:
 	return _dedupe_actions(actions)
 
 
-func _collect_deck_card_selection_actions(root: Node, screen: String) -> Array:
-	var screen_node := _find_visible_node_by_name(root, screen)
+func _collect_deck_card_selection_actions(root: Node, screen: String, search_global_overlay := false) -> Array:
+	var screen_node := root if search_global_overlay else _find_visible_node_by_name(root, screen)
 	if screen_node == null:
 		screen_node = root
 
