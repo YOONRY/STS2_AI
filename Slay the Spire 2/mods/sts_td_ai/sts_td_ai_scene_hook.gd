@@ -4,6 +4,9 @@ const SCAN_INTERVAL := 0.35
 const DECISION_COOLDOWN := 0.9
 const MAX_LABEL_TEXT := 80
 const MAX_ACTIONS_PER_SCAN := 24
+const CARD_DRAG_STEPS := 12
+const CARD_DRAG_STEP_INTERVAL := 0.025
+const CARD_DROP_DELAY := 0.05
 
 var ai: Node
 var scan_accumulator := 0.0
@@ -12,6 +15,7 @@ var last_signature := ""
 var last_state := {}
 var last_action := {}
 var last_action_was_executed := false
+var pending_pointer_drag := {}
 
 
 func setup(owner_ai: Node) -> void:
@@ -22,6 +26,14 @@ func setup(owner_ai: Node) -> void:
 
 func _process(delta: float) -> void:
 	if ai == null:
+		return
+	if !pending_pointer_drag.is_empty():
+		var detail := String(pending_pointer_drag.get("label", "card"))
+		_advance_pending_pointer_drag(delta)
+		ai.note_agent_status({
+			"phase": "dragging",
+			"detail": detail
+		})
 		return
 	scan_accumulator += delta
 	decision_cooldown = maxf(0.0, decision_cooldown - delta)
@@ -553,7 +565,7 @@ func _play_combat_card(node: Control, action: Dictionary) -> bool:
 	if from.x < 0.0:
 		return false
 	var target := _combat_card_target_position(action, from)
-	return _drag_pointer(from, target)
+	return _drag_pointer(from, target, _describe_action(action))
 
 
 func _combat_card_target_position(action: Dictionary, from: Vector2) -> Vector2:
@@ -571,11 +583,9 @@ func _combat_card_target_position(action: Dictionary, from: Vector2) -> Vector2:
 
 	var viewport_size := get_viewport().get_visible_rect().size
 	var upward := Vector2(
-		clampf(from.x, viewport_size.x * 0.2, viewport_size.x * 0.8),
-		clampf(from.y - 360.0, viewport_size.y * 0.25, viewport_size.y * 0.55)
+		viewport_size.x * 0.5,
+		clampf(from.y - 520.0, viewport_size.y * 0.25, viewport_size.y * 0.42)
 	)
-	if enemy_target.x >= 0.0 and !card_type.contains("skill") and !card_type.contains("스킬"):
-		return enemy_target
 	return upward
 
 
@@ -656,41 +666,81 @@ func _click_pointer(position: Vector2) -> bool:
 	return true
 
 
-func _drag_pointer(from: Vector2, to: Vector2) -> bool:
+func _drag_pointer(from: Vector2, to: Vector2, label := "card") -> bool:
 	if from.x < 0.0 or to.x < 0.0:
 		return false
-	get_viewport().warp_mouse(from)
-	var start_motion := InputEventMouseMotion.new()
-	start_motion.position = from
-	start_motion.global_position = from
-	get_viewport().push_input(start_motion, true)
-
-	var press := InputEventMouseButton.new()
-	press.button_index = MOUSE_BUTTON_LEFT
-	press.pressed = true
-	press.position = from
-	press.global_position = from
-	get_viewport().push_input(press, true)
-
-	var previous := from
-	for i in range(1, 9):
-		var t := float(i) / 8.0
-		var position := from.lerp(to, t)
-		var motion := InputEventMouseMotion.new()
-		motion.position = position
-		motion.global_position = position
-		motion.relative = position - previous
-		get_viewport().push_input(motion, true)
-		previous = position
-
-	var release := InputEventMouseButton.new()
-	release.button_index = MOUSE_BUTTON_LEFT
-	release.pressed = false
-	release.position = to
-	release.global_position = to
-	get_viewport().warp_mouse(to)
-	get_viewport().push_input(release, true)
+	if !pending_pointer_drag.is_empty():
+		return false
+	pending_pointer_drag = {
+		"phase": "press",
+		"from": from,
+		"to": to,
+		"last": from,
+		"index": 0,
+		"elapsed": 0.0,
+		"label": label
+	}
 	return true
+
+
+func _advance_pending_pointer_drag(delta: float) -> void:
+	if pending_pointer_drag.is_empty():
+		return
+	var phase := String(pending_pointer_drag.get("phase", "press"))
+	var from: Vector2 = pending_pointer_drag.get("from", Vector2.ZERO)
+	var to: Vector2 = pending_pointer_drag.get("to", Vector2.ZERO)
+	var last: Vector2 = pending_pointer_drag.get("last", from)
+	var elapsed := float(pending_pointer_drag.get("elapsed", 0.0)) + delta
+	pending_pointer_drag["elapsed"] = elapsed
+
+	match phase:
+		"press":
+			get_viewport().warp_mouse(from)
+			_send_mouse_motion(from, Vector2.ZERO, false)
+			_send_mouse_button(from, true)
+			pending_pointer_drag["phase"] = "move"
+			pending_pointer_drag["elapsed"] = 0.0
+		"move":
+			if elapsed < CARD_DRAG_STEP_INTERVAL:
+				return
+			var index := int(pending_pointer_drag.get("index", 0)) + 1
+			var t := minf(float(index) / float(CARD_DRAG_STEPS), 1.0)
+			var position := from.lerp(to, t)
+			get_viewport().warp_mouse(position)
+			_send_mouse_motion(position, position - last, true)
+			pending_pointer_drag["last"] = position
+			pending_pointer_drag["index"] = index
+			pending_pointer_drag["elapsed"] = 0.0
+			if index >= CARD_DRAG_STEPS:
+				pending_pointer_drag["phase"] = "release"
+		"release":
+			if elapsed < CARD_DROP_DELAY:
+				return
+			get_viewport().warp_mouse(to)
+			_send_mouse_motion(to, to - last, true)
+			_send_mouse_button(to, false)
+			pending_pointer_drag.clear()
+		_:
+			pending_pointer_drag.clear()
+
+
+func _send_mouse_button(position: Vector2, pressed: bool) -> void:
+	var event := InputEventMouseButton.new()
+	event.button_index = MOUSE_BUTTON_LEFT
+	event.pressed = pressed
+	event.position = position
+	event.global_position = position
+	event.button_mask = MOUSE_BUTTON_MASK_LEFT if pressed else 0
+	get_viewport().push_input(event, true)
+
+
+func _send_mouse_motion(position: Vector2, relative: Vector2, button_down: bool) -> void:
+	var event := InputEventMouseMotion.new()
+	event.position = position
+	event.global_position = position
+	event.relative = relative
+	event.button_mask = MOUSE_BUTTON_MASK_LEFT if button_down else 0
+	get_viewport().push_input(event, true)
 
 
 func _apply_action_priors(ranked: Array, context: Dictionary) -> void:
