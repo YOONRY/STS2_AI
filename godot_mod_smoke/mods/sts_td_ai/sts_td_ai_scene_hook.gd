@@ -518,6 +518,8 @@ func _execute_action(action: Dictionary) -> bool:
 		String(action.get("label", "")),
 		path_text
 	])
+	if action_type == "play_card":
+		return _play_combat_card(node, action)
 	if _prefers_pointer_click(action_type):
 		return _click_control(node)
 	if _invoke_sts_control(node):
@@ -534,7 +536,6 @@ func _execute_action(action: Dictionary) -> bool:
 
 func _prefers_pointer_click(action_type: String) -> bool:
 	return [
-		"play_card",
 		"pick_card",
 		"choose_card",
 		"select_deck_card",
@@ -545,6 +546,52 @@ func _prefers_pointer_click(action_type: String) -> bool:
 		"choose_relic",
 		"choose_map_node"
 	].has(action_type)
+
+
+func _play_combat_card(node: Control, action: Dictionary) -> bool:
+	var from := _control_center(node)
+	if from.x < 0.0:
+		return false
+	var target := _combat_card_target_position(action, from)
+	return _drag_pointer(from, target)
+
+
+func _combat_card_target_position(action: Dictionary, from: Vector2) -> Vector2:
+	var card_type := String(action.get("card_type", "")).to_lower()
+	var enemy_target := _first_enemy_target_position()
+	var wants_enemy := (
+		card_type.contains("attack") or
+		card_type.contains("공격") or
+		String(action.get("label", "")).to_lower().contains("strike") or
+		String(action.get("label", "")).contains("타격") or
+		String(action.get("label", "")).contains("강타")
+	)
+	if wants_enemy and enemy_target.x >= 0.0:
+		return enemy_target
+
+	var viewport_size := get_viewport().get_visible_rect().size
+	var upward := Vector2(
+		clampf(from.x, viewport_size.x * 0.2, viewport_size.x * 0.8),
+		clampf(from.y - 360.0, viewport_size.y * 0.25, viewport_size.y * 0.55)
+	)
+	if enemy_target.x >= 0.0 and !card_type.contains("skill") and !card_type.contains("스킬"):
+		return enemy_target
+	return upward
+
+
+func _first_enemy_target_position() -> Vector2:
+	var enemy_container := _find_visible_node_by_name(get_tree().root, "EnemyContainer")
+	if enemy_container == null:
+		return Vector2(-1.0, -1.0)
+	var hitbox := _find_first_visible_control_by_name_fragment(enemy_container, "Hitbox")
+	if hitbox != null:
+		return _control_center(hitbox)
+	for child in enemy_container.get_children():
+		if child is Control and child.is_visible_in_tree():
+			var center := _control_center(child)
+			if center.x >= 0.0:
+				return center
+	return Vector2(-1.0, -1.0)
 
 
 func _invoke_sts_control(node: Control) -> bool:
@@ -575,10 +622,20 @@ func _invoke_sts_control(node: Control) -> bool:
 
 
 func _click_control(node: Control) -> bool:
+	var position := _control_center(node)
+	if position.x < 0.0:
+		return false
+	return _click_pointer(position)
+
+
+func _control_center(node: Control) -> Vector2:
 	var rect := node.get_global_rect()
 	if rect.size.x <= 0.0 or rect.size.y <= 0.0:
-		return false
-	var position := rect.position + rect.size * 0.5
+		return Vector2(-1.0, -1.0)
+	return rect.position + rect.size * 0.5
+
+
+func _click_pointer(position: Vector2) -> bool:
 	var motion := InputEventMouseMotion.new()
 	motion.position = position
 	motion.global_position = position
@@ -595,6 +652,43 @@ func _click_control(node: Control) -> bool:
 	get_viewport().warp_mouse(position)
 	get_viewport().push_input(motion, true)
 	get_viewport().push_input(press, true)
+	get_viewport().push_input(release, true)
+	return true
+
+
+func _drag_pointer(from: Vector2, to: Vector2) -> bool:
+	if from.x < 0.0 or to.x < 0.0:
+		return false
+	get_viewport().warp_mouse(from)
+	var start_motion := InputEventMouseMotion.new()
+	start_motion.position = from
+	start_motion.global_position = from
+	get_viewport().push_input(start_motion, true)
+
+	var press := InputEventMouseButton.new()
+	press.button_index = MOUSE_BUTTON_LEFT
+	press.pressed = true
+	press.position = from
+	press.global_position = from
+	get_viewport().push_input(press, true)
+
+	var previous := from
+	for i in range(1, 9):
+		var t := float(i) / 8.0
+		var position := from.lerp(to, t)
+		var motion := InputEventMouseMotion.new()
+		motion.position = position
+		motion.global_position = position
+		motion.relative = position - previous
+		get_viewport().push_input(motion, true)
+		previous = position
+
+	var release := InputEventMouseButton.new()
+	release.button_index = MOUSE_BUTTON_LEFT
+	release.pressed = false
+	release.position = to
+	release.global_position = to
+	get_viewport().warp_mouse(to)
 	get_viewport().push_input(release, true)
 	return true
 
@@ -808,6 +902,17 @@ func _find_visible_node_by_name(root: Node, target_name: String) -> Node:
 		return root
 	for child in root.get_children():
 		var found := _find_visible_node_by_name(child, target_name)
+		if found != null:
+			return found
+	return null
+
+
+func _find_first_visible_control_by_name_fragment(root: Node, fragment: String) -> Control:
+	var lower_fragment := fragment.to_lower()
+	if root is Control and root.is_visible_in_tree() and String(root.name).to_lower().contains(lower_fragment):
+		return root
+	for child in root.get_children():
+		var found := _find_first_visible_control_by_name_fragment(child, fragment)
 		if found != null:
 			return found
 	return null
