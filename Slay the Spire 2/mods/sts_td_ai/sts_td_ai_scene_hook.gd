@@ -493,6 +493,7 @@ func _make_node_action(action_type: String, node: Control) -> Dictionary:
 	var card_name := _best_card_name_for_node(node)
 	var card_type := _best_named_label_for_node(node, "TypeLabel")
 	var card_cost := _first_number(_best_named_label_for_node(node, "EnergyLabel"))
+	var card_text := " ".join(_collect_nearby_card_labels(node, 16))
 	return {
 		"type": action_type,
 		"id": card_name if card_name != "" else (label if label != "" else String(node.name)),
@@ -501,7 +502,8 @@ func _make_node_action(action_type: String, node: Control) -> Dictionary:
 		"label": card_name if card_name != "" else label,
 		"card_name": card_name,
 		"card_type": card_type,
-		"card_cost": card_cost
+		"card_cost": card_cost,
+		"card_text": card_text
 	}
 
 
@@ -569,16 +571,17 @@ func _play_combat_card(node: Control, action: Dictionary) -> bool:
 
 
 func _combat_card_target_position(action: Dictionary, from: Vector2) -> Vector2:
-	var card_type := String(action.get("card_type", "")).to_lower()
+	var wants_enemy := _action_wants_enemy_target(action)
 	var enemy_target := _first_enemy_target_position()
-	var wants_enemy := (
-		card_type.contains("attack") or
-		card_type.contains("공격") or
-		String(action.get("label", "")).to_lower().contains("strike") or
-		String(action.get("label", "")).contains("타격") or
-		String(action.get("label", "")).contains("강타")
-	)
-	if wants_enemy and enemy_target.x >= 0.0:
+	if wants_enemy:
+		if enemy_target.x < 0.0:
+			enemy_target = _fallback_enemy_target_position()
+		print("[StsTdAi] combat target enemy label=%s type=%s text=%s to=%s" % [
+			String(action.get("label", "")),
+			String(action.get("card_type", "")),
+			String(action.get("card_text", "")).left(80),
+			str(enemy_target)
+		])
 		return enemy_target
 
 	var viewport_size := get_viewport().get_visible_rect().size
@@ -586,22 +589,60 @@ func _combat_card_target_position(action: Dictionary, from: Vector2) -> Vector2:
 		viewport_size.x * 0.5,
 		clampf(from.y - 520.0, viewport_size.y * 0.25, viewport_size.y * 0.42)
 	)
+	print("[StsTdAi] combat target playzone label=%s type=%s to=%s" % [
+		String(action.get("label", "")),
+		String(action.get("card_type", "")),
+		str(upward)
+	])
 	return upward
+
+
+func _action_wants_enemy_target(action: Dictionary) -> bool:
+	var card_type := String(action.get("card_type", "")).to_lower()
+	var label := String(action.get("label", "")).to_lower()
+	var card_text := String(action.get("card_text", "")).to_lower()
+	var combined := "%s %s %s" % [card_type, label, card_text]
+	var explicitly_non_target := (
+		card_type.contains("skill") or
+		card_type.contains("스킬") or
+		card_type.contains("power") or
+		card_type.contains("파워")
+	)
+	if card_type.contains("attack") or card_type.contains("공격"):
+		return true
+	for keyword in ["strike", "bash", "타격", "강타"]:
+		if combined.contains(keyword):
+			return true
+	if explicitly_non_target:
+		return false
+	for keyword in ["damage", "deal", "vulnerable", "weak", "poison", "피해", "취약", "약화", "독"]:
+		if combined.contains(keyword):
+			return true
+	return false
 
 
 func _first_enemy_target_position() -> Vector2:
 	var enemy_container := _find_visible_node_by_name(get_tree().root, "EnemyContainer")
 	if enemy_container == null:
 		return Vector2(-1.0, -1.0)
-	var hitbox := _find_first_visible_control_by_name_fragment(enemy_container, "Hitbox")
-	if hitbox != null:
-		return _control_center(hitbox)
+	var hitbox_target := _best_visible_control_center_by_name_fragment(enemy_container, "Hitbox")
+	if hitbox_target.x >= 0.0:
+		return hitbox_target
 	for child in enemy_container.get_children():
 		if child is Control and child.is_visible_in_tree():
 			var center := _control_center(child)
 			if center.x >= 0.0:
 				return center
+	if enemy_container is Control:
+		var center := _control_center(enemy_container)
+		if center.x >= 0.0:
+			return center
 	return Vector2(-1.0, -1.0)
+
+
+func _fallback_enemy_target_position() -> Vector2:
+	var viewport_size := get_viewport().get_visible_rect().size
+	return Vector2(viewport_size.x * 0.68, viewport_size.y * 0.45)
 
 
 func _invoke_sts_control(node: Control) -> bool:
@@ -968,6 +1009,35 @@ func _find_first_visible_control_by_name_fragment(root: Node, fragment: String) 
 	return null
 
 
+func _best_visible_control_center_by_name_fragment(root: Node, fragment: String) -> Vector2:
+	var candidates := []
+	_collect_visible_control_centers_by_name_fragment(root, fragment.to_lower(), candidates)
+	var best := Vector2(-1.0, -1.0)
+	var best_area := -1.0
+	for candidate in candidates:
+		if !(candidate is Dictionary):
+			continue
+		var area := float(candidate.get("area", 0.0))
+		if area > best_area:
+			best_area = area
+			best = candidate.get("center", best)
+	return best
+
+
+func _collect_visible_control_centers_by_name_fragment(node: Node, fragment: String, candidates: Array) -> void:
+	if node is Control and node.is_visible_in_tree() and !_is_our_hud_node(node):
+		var lower := String(node.name).to_lower()
+		if lower.contains(fragment):
+			var rect := (node as Control).get_global_rect()
+			if rect.size.x >= 16.0 and rect.size.y >= 16.0 and rect.size.x <= 900.0 and rect.size.y <= 700.0:
+				candidates.append({
+					"center": rect.position + rect.size * 0.5,
+					"area": rect.size.x * rect.size.y
+				})
+	for child in node.get_children():
+		_collect_visible_control_centers_by_name_fragment(child, fragment, candidates)
+
+
 func _best_label_for_node(node: Node) -> String:
 	var labels := _collect_visible_labels(node, 8)
 	if !labels.is_empty():
@@ -981,24 +1051,68 @@ func _best_label_for_node(node: Node) -> String:
 
 
 func _best_card_name_for_node(node: Node) -> String:
-	var title := _best_named_label_for_node(node, "TitleLabel")
+	var scope := _nearest_card_scope(node)
+	var title := _best_named_label_for_node(scope, "TitleLabel")
 	if title != "":
 		return title
 	var parent := node.get_parent()
-	while parent != null:
+	var depth := 0
+	while parent != null and depth < 6:
+		if _is_card_lookup_boundary(parent):
+			break
 		title = _best_named_label_for_node(parent, "TitleLabel")
 		if title != "":
 			return title
 		parent = parent.get_parent()
+		depth += 1
 	return ""
 
 
 func _best_named_label_for_node(node: Node, target_name: String) -> String:
-	var found := _find_visible_node_by_name(node, target_name)
-	if found != null and (found is Label or found is RichTextLabel):
-		var text := String(found.text).strip_edges()
+	var current := node
+	var depth := 0
+	while current != null and depth < 7:
+		if depth > 0 and _is_card_lookup_boundary(current):
+			break
+		var found := _find_visible_node_by_name(current, target_name)
+		var text := _text_from_label_node(found)
 		if text != "":
 			return text.left(MAX_LABEL_TEXT)
+		current = current.get_parent()
+		depth += 1
+	return ""
+
+
+func _collect_nearby_card_labels(node: Node, limit: int) -> Array:
+	var scope := _nearest_card_scope(node)
+	var labels := _collect_visible_labels(scope, limit)
+	if labels.is_empty() and node != scope:
+		labels = _collect_visible_labels(node, limit)
+	return labels
+
+
+func _nearest_card_scope(node: Node) -> Node:
+	var current := node
+	var depth := 0
+	while current != null and depth < 7:
+		if depth > 0 and _is_card_lookup_boundary(current):
+			break
+		var title := _find_visible_node_by_name(current, "TitleLabel")
+		if _text_from_label_node(title) != "":
+			return current
+		current = current.get_parent()
+		depth += 1
+	return node
+
+
+func _is_card_lookup_boundary(node: Node) -> bool:
+	var lower := String(node.name).to_lower()
+	return lower == "hand" or lower == "cardrow" or lower == "cardgrid" or lower.contains("enemycontainer")
+
+
+func _text_from_label_node(node: Node) -> String:
+	if node != null and (node is Label or node is RichTextLabel):
+		return String(node.text).strip_edges()
 	return ""
 
 
