@@ -560,6 +560,10 @@ func _card_choice_click_target(control: Control) -> Control:
 
 
 func _collect_reward_actions(root: Node) -> Array:
+	var card_selection_actions := _collect_rewards_screen_card_selection_actions(root)
+	if !card_selection_actions.is_empty():
+		return card_selection_actions
+
 	var container := _find_visible_node_by_name(root, "RewardsContainer")
 	var actions := []
 	if container != null:
@@ -570,6 +574,38 @@ func _collect_reward_actions(root: Node) -> Array:
 			actions.append(_make_node_action("claim_reward", node))
 	actions.append_array(_collect_named_control_actions(root, ["ProceedButton"], "proceed"))
 	return _dedupe_actions(actions)
+
+
+func _collect_rewards_screen_card_selection_actions(root: Node) -> Array:
+	if !_looks_like_card_reward_selection_overlay(root):
+		return []
+	var actions := []
+	var confirm_actions := _collect_visible_confirm_actions(root)
+	if !confirm_actions.is_empty():
+		return confirm_actions
+
+	var card_row := _find_visible_node_by_name(root, "CardRow")
+	if card_row != null:
+		actions.append_array(_collect_card_holder_actions(card_row, "choose_card"))
+		actions.append_array(_collect_reward_card_choice_actions(card_row, "choose_card"))
+	actions.append_array(_collect_reward_card_choice_actions(root, "choose_card"))
+
+	for node in _collect_controls_by_name_fragments(root, ["SkipButton", "SkipRewardButton", "ProceedButton"]):
+		if node is Control and node.is_visible_in_tree():
+			actions.append(_make_node_action("skip_card_reward", node))
+	return _dedupe_actions(actions)
+
+
+func _looks_like_card_reward_selection_overlay(root: Node) -> bool:
+	var text := " ".join(_collect_visible_labels(root, 120)).to_lower()
+	return (
+		text.contains("select a card") or
+		text.contains("choose a card") or
+		text.contains("add a card") or
+		text.contains("카드를 선택") or
+		text.contains("카드 선택") or
+		text.contains("덱에 추가")
+	)
 
 
 func _collect_map_actions(root: Node) -> Array:
@@ -705,7 +741,8 @@ func _is_card_choice_execution_action(action_type: String) -> bool:
 		"choose_card",
 		"reward_alternative",
 		"confirm_card_selection",
-		"skip_card_reward"
+		"skip_card_reward",
+		"claim_reward"
 	].has(action_type)
 
 
