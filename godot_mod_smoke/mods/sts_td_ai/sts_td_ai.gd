@@ -16,6 +16,7 @@ const DEFAULT_TRACE_LAMBDA := 0.75
 const DEFAULT_REPLAY_PASSES := 2
 const HUD_UPDATE_INTERVAL := 0.4
 const CARD_ACTION_TYPES := [
+	"play_card",
 	"pick_card",
 	"choose_card",
 	"select_deck_card",
@@ -56,6 +57,7 @@ var _hud_update_accumulator := 0.0
 
 func _ready() -> void:
 	process_mode = Node.PROCESS_MODE_ALWAYS
+	set_process_input(true)
 	_ensure_storage()
 	_load_settings()
 	_load_model()
@@ -77,6 +79,14 @@ func _process(delta: float) -> void:
 		return
 	_hud_update_accumulator = 0.0
 	_refresh_hud()
+
+
+func _input(event: InputEvent) -> void:
+	if event is InputEventKey and event.pressed and !event.echo:
+		if event.keycode == KEY_Q or event.physical_keycode == KEY_Q:
+			set_auto_play_enabled(!auto_play_enabled)
+			get_viewport().set_input_as_handled()
+			print("[StsTdAi] auto_play_enabled=%s via Q" % str(auto_play_enabled))
 
 
 func observe_step(state: Dictionary, action: Dictionary, reward: float, next_state: Dictionary, done: bool) -> float:
@@ -104,7 +114,7 @@ func observe_step(state: Dictionary, action: Dictionary, reward: float, next_sta
 
 
 func action_value(state: Dictionary, action: Dictionary) -> float:
-	return _learned_action_value(state, action) + card_action_heuristic(state, action)
+	return _learned_action_value(state, action) + action_heuristic(state, action)
 
 
 func value(state: Dictionary) -> float:
@@ -335,6 +345,8 @@ func extract_features(state: Dictionary) -> Dictionary:
 	var gold: float = float(state.get("gold", 0.0))
 	var block: float = float(state.get("block", 0.0))
 	var energy: float = float(state.get("energy", 0.0))
+	var energy_known := bool(state.get("energy_known", energy >= 0.0))
+	var energy_for_features := maxf(energy, 0.0)
 
 	var features := {
 		"bias": 1.0,
@@ -343,7 +355,11 @@ func extract_features(state: Dictionary) -> Dictionary:
 		"floor_norm": floor_value / 60.0,
 		"gold_norm": log(maxf(gold, 0.0) + 1.0) / 8.0,
 		"block_norm": minf(block / 50.0, 1.0),
-		"energy_norm": minf(energy / 5.0, 1.0)
+		"energy_norm": minf(energy_for_features / 5.0, 1.0),
+		"energy_known": 1.0 if energy_known else 0.0,
+		"no_energy": 1.0 if energy_known and energy <= 0.0 else 0.0,
+		"playable_card_count_norm": minf(float(state.get("playable_card_count", 0)) / 10.0, 1.0),
+		"unplayable_card_count_norm": minf(float(state.get("unplayable_card_count", 0)) / 10.0, 1.0)
 	}
 
 	_add_collection_features(features, "deck", state.get("deck", []), 0.05)
@@ -371,6 +387,8 @@ func extract_action_features(state: Dictionary, action: Dictionary) -> Dictionar
 	var card_name := _card_name_from_action(action)
 	var card_type := String(action.get("card_type", "")).to_lower()
 	var card_cost := float(action.get("card_cost", -1.0))
+	var energy := float(state.get("energy", -1.0))
+	var energy_known := bool(state.get("energy_known", energy >= 0.0))
 
 	var features := {"action_bias": 1.0}
 	features["action_type:%s" % action_type] = 1.0
@@ -393,6 +411,12 @@ func extract_action_features(state: Dictionary, action: Dictionary) -> Dictionar
 			features["card_base_score_deck_%s" % band] = base_score * active
 		if card_cost >= 0.0:
 			features["card_cost_norm"] = minf(card_cost / 4.0, 1.0)
+			if energy_known:
+				features["card_affordable"] = 1.0 if card_cost <= energy else 0.0
+				features["card_energy_shortfall_norm"] = minf(maxf(card_cost - energy, 0.0) / 4.0, 1.0)
+				features["card_energy_remaining_norm"] = minf(maxf(energy - card_cost, 0.0) / 5.0, 1.0)
+		if action.has("playable"):
+			features["card_marked_playable"] = 1.0 if bool(action.get("playable", true)) else 0.0
 		if card_type != "":
 			features["card_type:%s" % card_type] = 1.0
 			for band in deck_flags.keys():
@@ -406,6 +430,10 @@ func extract_action_features(state: Dictionary, action: Dictionary) -> Dictionar
 				if float(deck_flags[band]) > 0.0:
 					features["card_deck:%d:%s" % [bucket, band]] = 1.0
 					features["action_card_deck:%s:%d:%s" % [action_type, bucket, band]] = 1.0
+	if action_type == "end_turn":
+		features["end_turn_bias"] = 1.0
+		features["end_turn_no_playable"] = 1.0 if int(state.get("playable_card_count", 0)) <= 0 else 0.0
+		features["end_turn_energy_empty"] = 1.0 if energy_known and energy <= 0.0 else 0.0
 	return features
 
 
@@ -416,6 +444,8 @@ func card_action_heuristic(state: Dictionary, action: Dictionary) -> float:
 	var card_name := _card_name_from_action(action)
 	var card_type := String(action.get("card_type", "")).to_lower()
 	var card_cost := float(action.get("card_cost", -1.0))
+	if action_type == "play_card":
+		return _play_card_heuristic(state, action, card_name, card_type, card_cost)
 	var base_score := _card_base_score(card_name, card_type, card_cost)
 	var deck = state.get("deck", [])
 	var deck_size := float(deck.size()) if deck is Array else 0.0
@@ -444,6 +474,86 @@ func card_action_heuristic(state: Dictionary, action: Dictionary) -> float:
 	return 0.0
 
 
+func _play_card_heuristic(state: Dictionary, action: Dictionary, card_name: String, card_type: String, card_cost: float) -> float:
+	if !_is_play_card_affordable(state, action, card_cost):
+		return -3.0 - float(action.get("energy_shortfall", 0.0)) * 0.75
+	if _is_curse_or_status(card_name, card_type):
+		return -2.0
+
+	var lower_name := card_name.to_lower()
+	var lower_type := card_type.to_lower()
+	var card_text := String(action.get("card_text", "")).to_lower()
+	var combined := "%s %s %s" % [lower_name, lower_type, card_text]
+	var score := 0.04
+	if lower_type.contains("attack") or lower_type.contains("공격"):
+		score += 0.24
+	if lower_type.contains("skill") or lower_type.contains("스킬"):
+		score += 0.12
+	if lower_type.contains("power") or lower_type.contains("파워"):
+		score += 0.20
+	if combined.contains("damage") or combined.contains("피해"):
+		score += 0.18
+	if combined.contains("block") or combined.contains("방어도"):
+		score += 0.14
+	if combined.contains("vulnerable") or combined.contains("weak") or combined.contains("취약") or combined.contains("약화"):
+		score += 0.12
+	if combined.contains("draw") or combined.contains("카드를") or combined.contains("뽑"):
+		score += 0.08
+	if combined.contains("gain") or combined.contains("얻"):
+		score += 0.04
+	if _is_basic_strike(card_name):
+		score += 0.10
+	if _is_basic_defend(card_name):
+		score += 0.06
+	if lower_name.contains("bash") or lower_name.contains("강타"):
+		score += 0.18
+	if card_cost == 0.0:
+		score += 0.08
+	elif card_cost >= 2.0:
+		score -= 0.04 * card_cost
+
+	var energy := float(state.get("energy", -1.0))
+	var energy_known := bool(state.get("energy_known", energy >= 0.0))
+	if energy_known and card_cost >= 0.0:
+		var remaining := energy - card_cost
+		if remaining <= 0.0:
+			score -= 0.04
+		else:
+			score += minf(remaining * 0.025, 0.08)
+	return clampf(score, -2.5, 1.2)
+
+
+func _is_play_card_affordable(state: Dictionary, action: Dictionary, card_cost: float) -> bool:
+	if action.has("playable") and !bool(action.get("playable", true)):
+		return false
+	var energy := float(state.get("energy", -1.0))
+	var energy_known := bool(state.get("energy_known", energy >= 0.0))
+	if energy_known and card_cost >= 0.0 and card_cost > energy:
+		return false
+	return true
+
+
+func end_turn_heuristic(state: Dictionary) -> float:
+	if String(state.get("screen", "")) != "CombatRoom":
+		return 0.0
+	var energy := float(state.get("energy", -1.0))
+	var energy_known := bool(state.get("energy_known", energy >= 0.0))
+	var playable_count := int(state.get("playable_card_count", 0))
+	var unplayable_count := int(state.get("unplayable_card_count", 0))
+	var score := 0.02
+	if playable_count <= 0:
+		score += 1.15
+	if energy_known and energy <= 0.0:
+		score += 0.95
+	elif energy_known and energy <= 1.0 and playable_count <= 1:
+		score += 0.18
+	if unplayable_count > 0 and playable_count <= 0:
+		score += 0.35
+	if playable_count > 0:
+		score -= 0.22
+	return clampf(score, -0.4, 2.2)
+
+
 func _deck_size_flags(deck_size: float) -> Dictionary:
 	return {
 		"thin": 1.0 if deck_size <= 20.0 else 0.0,
@@ -458,6 +568,13 @@ func _learned_action_value(state: Dictionary, action: Dictionary) -> float:
 	for feature_name in features.keys():
 		result += float(action_weights.get(feature_name, 0.0)) * float(features[feature_name])
 	return result
+
+
+func action_heuristic(state: Dictionary, action: Dictionary) -> float:
+	var action_type := String(action.get("type", "unknown")).to_lower()
+	if action_type == "end_turn":
+		return end_turn_heuristic(state)
+	return card_action_heuristic(state, action)
 
 
 func _is_card_action_type(action_type: String) -> bool:
@@ -766,8 +883,16 @@ func _refresh_hud() -> void:
 		best_type = String(action.get("type", ""))
 	var phase := String(agent_status.get("phase", "idle"))
 	var detail := String(agent_status.get("detail", ""))
+	var state: Dictionary = last_context.get("state", {}) if last_context is Dictionary else {}
+	var energy_text := "?"
+	if bool(state.get("energy_known", false)):
+		energy_text = str(int(float(state.get("energy", 0.0))))
+	var playable_text := "%d/%d" % [
+		int(state.get("playable_card_count", 0)),
+		int(state.get("playable_card_count", 0)) + int(state.get("unplayable_card_count", 0))
+	]
 	var spinner := _status_spinner()
-	_hud_label.text = "STS TD AI %s %s\nstate=%s %s\nscreen=%s actions=%d steps=%d\nbest=%s %s %.3f" % [
+	_hud_label.text = "STS TD AI %s %s\nstate=%s %s\nscreen=%s actions=%d steps=%d\nenergy=%s playable=%s\nbest=%s %s %.3f\nQ toggles AI" % [
 		"ON" if auto_play_enabled else "OFF",
 		spinner if auto_play_enabled else "",
 		phase,
@@ -775,6 +900,8 @@ func _refresh_hud() -> void:
 		screen if screen != "" else "unknown",
 		last_ranked_actions.size(),
 		total_observed_steps,
+		energy_text,
+		playable_text,
 		best_type,
 		best_label,
 		best_value

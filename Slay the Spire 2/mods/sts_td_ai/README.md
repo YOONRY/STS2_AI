@@ -106,7 +106,7 @@ manual player chose the same action.
 ## In-Game Controls
 
 The small `STS TD AI` overlay includes one `Turn AI ON` / `Turn AI OFF` button.
-Press it to toggle auto-play.
+Press it, or press `Q`, to toggle auto-play.
 
 The overlay also shows the agent state:
 
@@ -116,6 +116,11 @@ The overlay also shows the agent state:
 - `clicked`: An action was sent.
 - `cooldown`: Waiting briefly before retrying.
 - `waiting`: A screen was found, but no clickable action was found.
+
+During combat the overlay also shows detected energy and the number of playable
+hand cards. The agent strongly prefers `EndTurnButton` when no card is playable
+or current energy is exhausted, and it avoids dragging cards whose known cost is
+higher than the detected energy.
 
 This is intentionally conservative because the current extraction does not
 include usable C# gameplay bodies. Once those are available, replace the

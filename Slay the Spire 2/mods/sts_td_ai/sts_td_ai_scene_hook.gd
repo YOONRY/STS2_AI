@@ -66,7 +66,8 @@ func _scan_current_screen() -> void:
 		"detail": String(context["screen"])
 	})
 	var state := _extract_state(root, context)
-	var actions := _collect_actions(root, context)
+	var actions := _collect_actions(root, context, state)
+	_update_combat_state_from_actions(state, actions, context)
 	if actions.is_empty():
 		ai.note_agent_status({
 			"phase": "waiting",
@@ -74,7 +75,7 @@ func _scan_current_screen() -> void:
 		})
 		return
 
-	var signature := _make_signature(context, actions)
+	var signature := _make_signature(context, actions, state)
 	if signature == last_signature and decision_cooldown > 0.0:
 		ai.note_agent_status({
 			"phase": "cooldown",
@@ -89,7 +90,7 @@ func _scan_current_screen() -> void:
 		last_action_was_executed = false
 
 	var ranked: Array = ai.rank_actions(state, actions)
-	_apply_action_priors(ranked, context)
+	_apply_action_priors(ranked, context, state)
 	ranked.sort_custom(func(a, b): return float(a["value"]) > float(b["value"]))
 	ai.note_decision_context(context, state, ranked)
 	ai.note_agent_status({
@@ -164,6 +165,32 @@ func execute_best_ranked_action() -> Dictionary:
 	return action
 
 
+func _update_combat_state_from_actions(state: Dictionary, actions: Array, context: Dictionary) -> void:
+	if String(context.get("screen", "")) != "CombatRoom":
+		return
+	var playable_count := 0
+	var unplayable_count := 0
+	var known_cost_count := 0
+	var lowest_playable_cost := 999.0
+	for action in actions:
+		if !(action is Dictionary) or String(action.get("type", "")) != "play_card":
+			continue
+		if float(action.get("card_cost", -1.0)) >= 0.0:
+			known_cost_count += 1
+		if bool(action.get("playable", true)):
+			playable_count += 1
+			var cost := float(action.get("card_cost", -1.0))
+			if cost >= 0.0:
+				lowest_playable_cost = minf(lowest_playable_cost, cost)
+		else:
+			unplayable_count += 1
+	state["playable_card_count"] = playable_count
+	state["unplayable_card_count"] = unplayable_count
+	state["known_card_cost_count"] = known_cost_count
+	if lowest_playable_cost < 999.0:
+		state["lowest_playable_card_cost"] = lowest_playable_cost
+
+
 func _estimate_transition_reward(previous_state: Dictionary, next_state: Dictionary, context: Dictionary) -> float:
 	var reward: float = 0.0
 	var previous_hp: float = float(previous_state.get("hp", 0.0))
@@ -224,6 +251,7 @@ func _detect_context(root: Node) -> Dictionary:
 
 func _extract_state(root: Node, context: Dictionary) -> Dictionary:
 	var labels := _collect_visible_labels(root, 96)
+	var energy_info := _extract_energy_info(root, labels)
 	var state := {
 		"screen": context["screen"],
 		"screen_path": context["path"],
@@ -231,18 +259,22 @@ func _extract_state(root: Node, context: Dictionary) -> Dictionary:
 		"hp": _extract_number_after(labels, ["HP", "Health"]),
 		"gold": _extract_number_after(labels, ["Gold"]),
 		"floor": _extract_number_after(labels, ["Floor"]),
+		"energy": float(energy_info.get("energy", -1.0)),
+		"energy_known": bool(energy_info.get("known", false)),
 		"deck": _collect_card_names(root),
 		"relics": [],
 		"potions": [],
 		"hand": _collect_hand_card_names(root),
-		"enemies": _collect_enemy_summaries(root)
+		"enemies": _collect_enemy_summaries(root),
+		"playable_card_count": 0,
+		"unplayable_card_count": 0
 	}
 	if float(state["hp"]) > 0.0:
 		state["max_hp"] = maxf(float(state["hp"]), _extract_slash_denominator(labels))
 	return state
 
 
-func _collect_actions(root: Node, context: Dictionary) -> Array:
+func _collect_actions(root: Node, context: Dictionary, state := {}) -> Array:
 	var screen := String(context["screen"])
 	var embedded_deck_actions := _collect_embedded_deck_card_selection_actions(root, screen)
 	if !embedded_deck_actions.is_empty():
@@ -251,7 +283,7 @@ func _collect_actions(root: Node, context: Dictionary) -> Array:
 	var actions := []
 	match screen:
 		"CombatRoom":
-			actions.append_array(_collect_combat_actions(root))
+			actions.append_array(_collect_combat_actions(root, state))
 		"CardRewardSelectionScreen", "ChooseACardSelectionScreen", "ChooseABundleSelectionScreen":
 			actions.append_array(_collect_card_choice_actions(root, screen))
 		"ChooseARelicSelection", "ChooseARelicSelectionScreen":
@@ -293,14 +325,47 @@ func _is_deck_card_action_type(action_type: String) -> bool:
 	].has(action_type)
 
 
-func _collect_combat_actions(root: Node) -> Array:
+func _collect_combat_actions(root: Node, state: Dictionary) -> Array:
 	var actions := []
+	var energy := float(state.get("energy", -1.0))
+	var energy_known := bool(state.get("energy_known", false))
 	var hand := _find_visible_node_by_name(root, "Hand")
 	if hand != null:
 		for node in _collect_clickable_controls(hand):
-			actions.append(_make_node_action("play_card", node))
-	actions.append_array(_collect_named_control_actions(root, ["EndTurnButton"], "end_turn"))
+			var action := _make_node_action("play_card", node)
+			_annotate_playable_card_action(action, energy, energy_known)
+			actions.append(action)
+	actions.append_array(_collect_end_turn_actions(root))
 	return actions
+
+
+func _annotate_playable_card_action(action: Dictionary, energy: float, energy_known: bool) -> void:
+	var card_cost := float(action.get("card_cost", -1.0))
+	var playable := true
+	var shortfall := 0.0
+	if energy_known and card_cost >= 0.0:
+		shortfall = maxf(card_cost - energy, 0.0)
+		playable = shortfall <= 0.0
+	action["playable"] = playable
+	action["energy"] = energy
+	action["energy_known"] = energy_known
+	action["energy_shortfall"] = shortfall
+	if energy_known and card_cost >= 0.0:
+		action["energy_remaining_after"] = energy - card_cost
+
+
+func _collect_end_turn_actions(root: Node) -> Array:
+	var actions := _collect_named_control_actions(root, ["EndTurnButton", "EndTurn"], "end_turn")
+	for node in _collect_controls_by_name_fragments(root, ["EndTurn", "end_turn", "TurnEnd", "turn_end"]):
+		if node is Control and node.is_visible_in_tree():
+			actions.append(_make_node_action("end_turn", node))
+	if actions.is_empty():
+		for node in _collect_clickable_controls(root, true, false):
+			var lower := String(node.name).to_lower()
+			var label := _best_label_for_node(node).to_lower()
+			if lower.contains("endturn") or lower.contains("turnend") or label.contains("end turn") or label.contains("턴 종료"):
+				actions.append(_make_node_action("end_turn", node))
+	return _dedupe_actions(actions)
 
 
 func _collect_card_choice_actions(root: Node, screen: String) -> Array:
@@ -533,6 +598,13 @@ func _execute_action(action: Dictionary) -> bool:
 		path_text
 	])
 	if action_type == "play_card":
+		if action.has("playable") and !bool(action.get("playable", true)):
+			print("[StsTdAi] skip unplayable card label=%s cost=%.1f energy=%.1f" % [
+				String(action.get("label", "")),
+				float(action.get("card_cost", -1.0)),
+				float(action.get("energy", -1.0))
+			])
+			return false
 		return _play_combat_card(node, action)
 	if _prefers_pointer_click(action_type):
 		return _click_control(node)
@@ -558,7 +630,8 @@ func _prefers_pointer_click(action_type: String) -> bool:
 		"upgrade_card",
 		"enchant_card",
 		"choose_relic",
-		"choose_map_node"
+		"choose_map_node",
+		"end_turn"
 	].has(action_type)
 
 
@@ -653,6 +726,8 @@ func _invoke_sts_control(node: Control) -> bool:
 		node_name.contains("cardrewardalternativebutton") or
 		node_name.contains("proceedbutton") or
 		node_name.contains("skipbutton") or
+		node_name.contains("endturn") or
+		node_name.contains("turnend") or
 		node_name.contains("confirm") or
 		node_name.contains("relic") or
 		node_name.contains("hitbox") or
@@ -784,11 +859,20 @@ func _send_mouse_motion(position: Vector2, relative: Vector2, button_down: bool)
 	get_viewport().push_input(event, true)
 
 
-func _apply_action_priors(ranked: Array, context: Dictionary) -> void:
+func _apply_action_priors(ranked: Array, context: Dictionary, state := {}) -> void:
+	var screen := String(context.get("screen", ""))
+	var energy_known := bool(state.get("energy_known", false))
+	var energy := float(state.get("energy", -1.0))
+	var playable_count := int(state.get("playable_card_count", 0))
 	for item in ranked:
 		var action: Dictionary = item["action"]
 		var score: float = float(item["value"])
 		match String(action.get("type", "")):
+			"play_card":
+				if action.has("playable") and !bool(action.get("playable", true)):
+					score -= 4.0 + float(action.get("energy_shortfall", 0.0)) * 0.75
+				elif screen == "CombatRoom":
+					score += 0.08
 			"pick_card":
 				score += 0.02
 			"choose_card":
@@ -802,10 +886,17 @@ func _apply_action_priors(ranked: Array, context: Dictionary) -> void:
 			"proceed":
 				score -= 0.05
 			"end_turn":
-				score -= 0.01
+				score += 0.02
+				if screen == "CombatRoom":
+					if playable_count <= 0:
+						score += 3.0
+					elif energy_known and energy <= 0.0:
+						score += 2.4
+					else:
+						score -= 0.18
 			"choose_map_node":
 				score += 0.01
-		if String(context.get("screen", "")) == "GameOverScreen":
+		if screen == "GameOverScreen":
 			score += 1.0
 		item["value"] = score
 
@@ -880,6 +971,21 @@ func _collect_controls_by_name_fragment(root: Node, fragment: String) -> Array:
 	return results
 
 
+func _collect_controls_by_name_fragments(root: Node, fragments: Array) -> Array:
+	var results := []
+	var seen := {}
+	for fragment in fragments:
+		for node in _collect_controls_by_name_fragment(root, String(fragment)):
+			if !(node is Control):
+				continue
+			var path := str(node.get_path())
+			if seen.has(path):
+				continue
+			seen[path] = true
+			results.append(node)
+	return results
+
+
 func _collect_controls_by_name_fragment_recursive(node: Node, fragment: String, results: Array) -> void:
 	if node is Control and node.is_visible_in_tree():
 		if String(node.name).to_lower().contains(fragment) and !_is_our_hud_node(node):
@@ -938,6 +1044,128 @@ func _collect_visible_labels(root: Node, limit: int) -> Array:
 	var labels := []
 	_collect_visible_labels_recursive(root, labels, limit)
 	return labels
+
+
+func _extract_energy_info(root: Node, labels: Array) -> Dictionary:
+	var labeled_value := _extract_labeled_energy_value(labels)
+	if labeled_value >= 0.0:
+		return {
+			"energy": labeled_value,
+			"known": true
+		}
+
+	var energy_nodes := _collect_controls_by_name_fragments(root, [
+		"Energy",
+		"energy",
+		"Mana",
+		"mana"
+	])
+	for node in energy_nodes:
+		if !(node is Control) or _is_our_hud_node(node):
+			continue
+		var value := _extract_energy_from_node_scope(node)
+		if value >= 0.0:
+			return {
+				"energy": value,
+				"known": true
+			}
+		value = _extract_nearest_energy_label(root, node)
+		if value >= 0.0:
+			return {
+				"energy": value,
+				"known": true
+			}
+
+	return {
+		"energy": -1.0,
+		"known": false
+	}
+
+
+func _extract_labeled_energy_value(labels: Array) -> float:
+	for label in labels:
+		var text := String(label)
+		var lower := text.to_lower()
+		var looks_like_energy_label := (
+			text.length() <= 24 and (
+				lower.begins_with("energy") or
+				lower.begins_with("mana") or
+				text.begins_with("에너지")
+			)
+		)
+		if looks_like_energy_label:
+			var value := _first_number(text)
+			if _is_reasonable_energy_value(value):
+				return value
+	return -1.0
+
+
+func _extract_energy_from_node_scope(node: Node) -> float:
+	var current := node
+	var depth := 0
+	while current != null and depth < 3:
+		var labels := _collect_visible_labels(current, 12)
+		var value := _extract_labeled_energy_value(labels)
+		if value >= 0.0:
+			return value
+		value = _first_reasonable_energy_value(labels)
+		if value >= 0.0:
+			return value
+		current = current.get_parent()
+		depth += 1
+	return -1.0
+
+
+func _extract_nearest_energy_label(root: Node, node: Control) -> float:
+	var center := _control_center(node)
+	if center.x < 0.0:
+		return -1.0
+	var labels := []
+	_collect_visible_label_infos(root, labels, 220)
+	var best_value := -1.0
+	var best_distance := 999999.0
+	for info in labels:
+		if !(info is Dictionary):
+			continue
+		var value := _first_number(String(info.get("text", "")))
+		if !_is_reasonable_energy_value(value):
+			continue
+		var distance := center.distance_to(info.get("center", center))
+		if distance < best_distance and distance <= 220.0:
+			best_distance = distance
+			best_value = value
+	return best_value
+
+
+func _collect_visible_label_infos(node: Node, labels: Array, limit: int) -> void:
+	if labels.size() >= limit:
+		return
+	if (node is Label or node is RichTextLabel) and node.is_visible_in_tree() and !_is_our_hud_node(node):
+		var text := String(node.text).strip_edges()
+		if text != "":
+			var rect := (node as Control).get_global_rect()
+			if rect.size.x > 0.0 and rect.size.y > 0.0:
+				labels.append({
+					"text": text.left(MAX_LABEL_TEXT),
+					"center": rect.position + rect.size * 0.5
+				})
+	for child in node.get_children():
+		_collect_visible_label_infos(child, labels, limit)
+
+
+func _first_reasonable_energy_value(labels: Array) -> float:
+	for label in labels:
+		var text := String(label).strip_edges()
+		if text == "":
+			continue
+		var value := _first_number(text)
+		if _is_reasonable_energy_value(value):
+			return value
+	return -1.0
+
+
+func _is_reasonable_energy_value(value: float) -> bool:
+	return value >= 0.0 and value <= 10.0
 
 
 func _collect_visible_labels_recursive(node: Node, labels: Array, limit: int) -> void:
@@ -1178,8 +1406,18 @@ func _screen_to_action_type(screen: String) -> String:
 	return "generic_choice"
 
 
-func _make_signature(context: Dictionary, actions: Array) -> String:
-	var parts := [String(context.get("screen", "")), String(context.get("path", "")), str(actions.size())]
+func _make_signature(context: Dictionary, actions: Array, state := {}) -> String:
+	var parts := [
+		String(context.get("screen", "")),
+		String(context.get("path", "")),
+		str(actions.size()),
+		str(state.get("energy", "")),
+		str(state.get("playable_card_count", ""))
+	]
 	for action in actions:
-		parts.append(String(action.get("node_path", "")))
+		parts.append("%s:%s:%s" % [
+			String(action.get("node_path", "")),
+			str(action.get("playable", "")),
+			str(action.get("card_cost", ""))
+		])
 	return "|".join(parts)
