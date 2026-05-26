@@ -231,6 +231,10 @@ func _extract_state(root: Node, context: Dictionary) -> Dictionary:
 
 func _collect_actions(root: Node, context: Dictionary) -> Array:
 	var screen := String(context["screen"])
+	var embedded_deck_actions := _collect_embedded_deck_card_selection_actions(root, screen)
+	if !embedded_deck_actions.is_empty():
+		return embedded_deck_actions
+
 	var actions := []
 	match screen:
 		"CombatRoom":
@@ -248,6 +252,30 @@ func _collect_actions(root: Node, context: Dictionary) -> Array:
 		_:
 			actions.append_array(_collect_generic_choice_actions(root, screen))
 	return actions
+
+
+func _collect_embedded_deck_card_selection_actions(root: Node, screen: String) -> Array:
+	if !["EventRoom", "MerchantRoom", "RestSiteRoom", "TreasureRoom"].has(screen):
+		return []
+	var actions := _collect_deck_card_selection_actions(root, screen)
+	var deck_actions := []
+	for action in actions:
+		if !(action is Dictionary):
+			continue
+		var action_type := String(action.get("type", ""))
+		if action_type == "confirm_card_selection" or _is_deck_card_action_type(action_type):
+			deck_actions.append(action)
+	return _dedupe_actions(deck_actions)
+
+
+func _is_deck_card_action_type(action_type: String) -> bool:
+	return [
+		"select_deck_card",
+		"remove_card",
+		"transform_card",
+		"upgrade_card",
+		"enchant_card"
+	].has(action_type)
 
 
 func _collect_combat_actions(root: Node) -> Array:
