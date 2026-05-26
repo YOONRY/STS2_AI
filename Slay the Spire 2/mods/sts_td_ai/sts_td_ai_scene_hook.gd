@@ -366,9 +366,15 @@ func _collect_deck_card_selection_actions(root: Node, screen: String, search_glo
 
 func _collect_visible_confirm_actions(root: Node) -> Array:
 	var actions := []
-	if !_has_visible_preview_container(root):
+	var preview_container := _find_visible_preview_container(root)
+	if preview_container == null:
 		return actions
-	for node in _collect_controls_by_name_fragment(root, "Confirm"):
+	for node in _collect_controls_by_name_fragment(preview_container, "PreviewConfirm"):
+		if node is Control and node.is_visible_in_tree():
+			actions.append(_make_node_action("confirm_card_selection", node))
+	if !actions.is_empty():
+		return _dedupe_actions(actions)
+	for node in _collect_controls_by_name_fragment(preview_container, "Confirm"):
 		if node is Control and node.is_visible_in_tree():
 			actions.append(_make_node_action("confirm_card_selection", node))
 	return _dedupe_actions(actions)
@@ -495,12 +501,16 @@ func _execute_action(action: Dictionary) -> bool:
 	var node := get_node_or_null(path)
 	if node == null or !(node is Control) or !node.is_visible_in_tree():
 		return false
+	var action_type := String(action.get("type", ""))
 	print("[StsTdAi] execute type=%s label=%s node=%s" % [
-		String(action.get("type", "")),
+		action_type,
 		String(action.get("label", "")),
 		path_text
 	])
+	if _prefers_pointer_click(action_type):
+		return _click_control(node)
 	if _invoke_sts_control(node):
+		_click_control(node)
 		return true
 	if node is BaseButton:
 		node.pressed.emit()
@@ -509,6 +519,20 @@ func _execute_action(action: Dictionary) -> bool:
 		node.emit_signal("pressed")
 		return true
 	return _click_control(node)
+
+
+func _prefers_pointer_click(action_type: String) -> bool:
+	return [
+		"play_card",
+		"pick_card",
+		"choose_card",
+		"select_deck_card",
+		"remove_card",
+		"transform_card",
+		"upgrade_card",
+		"enchant_card",
+		"choose_relic"
+	].has(action_type)
 
 
 func _invoke_sts_control(node: Control) -> bool:
@@ -675,18 +699,15 @@ func _has_ancestor_name_fragment(node: Node, fragment: String) -> bool:
 	return false
 
 
-func _has_visible_preview_container(root: Node) -> bool:
-	return _has_visible_preview_container_recursive(root)
-
-
-func _has_visible_preview_container_recursive(node: Node) -> bool:
-	if String(node.name).to_lower().contains("previewcontainer"):
-		if !(node is CanvasItem) or node.is_visible_in_tree():
-			return true
-	for child in node.get_children():
-		if _has_visible_preview_container_recursive(child):
-			return true
-	return false
+func _find_visible_preview_container(root: Node) -> Node:
+	if String(root.name).to_lower().contains("previewcontainer"):
+		if !(root is CanvasItem) or root.is_visible_in_tree():
+			return root
+	for child in root.get_children():
+		var found := _find_visible_preview_container(child)
+		if found != null:
+			return found
+	return null
 
 
 func _dedupe_actions(actions: Array) -> Array:
