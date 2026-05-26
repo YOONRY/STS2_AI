@@ -435,12 +435,23 @@ func _collect_reward_actions(root: Node) -> Array:
 
 
 func _collect_map_actions(root: Node) -> Array:
+	var map_screen := _find_visible_node_by_name(root, "MapScreen")
+	if map_screen == null:
+		map_screen = root
 	var actions := []
-	for node in _collect_clickable_controls(root):
-		var node_name := String(node.name).to_lower()
-		if node_name.contains("mappoint") or node_name.contains("map_point") or node_name.contains("mapdot"):
-			actions.append(_make_node_action("choose_map_node", node))
-	return actions
+	_collect_map_point_actions_recursive(map_screen, actions)
+	return _dedupe_actions(actions)
+
+
+func _collect_map_point_actions_recursive(node: Node, actions: Array) -> void:
+	if node is Control and node.is_visible_in_tree() and !_is_our_hud_node(node):
+		var lower := String(node.name).to_lower()
+		if lower.contains("mappoint") or lower.contains("map_point") or lower.contains("mapdot"):
+			var rect := (node as Control).get_global_rect()
+			if rect.size.x >= 24.0 and rect.size.y >= 24.0 and rect.size.x <= 260.0 and rect.size.y <= 260.0:
+				actions.append(_make_node_action("choose_map_node", node))
+	for child in node.get_children():
+		_collect_map_point_actions_recursive(child, actions)
 
 
 func _collect_generic_choice_actions(root: Node, screen: String) -> Array:
@@ -531,7 +542,8 @@ func _prefers_pointer_click(action_type: String) -> bool:
 		"transform_card",
 		"upgrade_card",
 		"enchant_card",
-		"choose_relic"
+		"choose_relic",
+		"choose_map_node"
 	].has(action_type)
 
 
@@ -545,7 +557,9 @@ func _invoke_sts_control(node: Control) -> bool:
 		node_name.contains("skipbutton") or
 		node_name.contains("confirm") or
 		node_name.contains("relic") or
-		node_name.contains("hitbox")
+		node_name.contains("hitbox") or
+		node_name.contains("mappoint") or
+		node_name.contains("map_point")
 	)
 	if !should_try:
 		return false
